@@ -1,0 +1,26 @@
+{
+	"ImportPath": "github.com/bwester/consulfs",
+	"GoVersion": "go1.4.2",
+	"Packages": [
+		"./..."
+	],
+	"Deps": [
+		{
+			"ImportPath": "bazil.org/fuse",
+			"Rev": "ad3456914df591ff11619d585104b48f779fd7fa"
+		},
+		{
+			"ImportPath": "github.com/golang/glog",
+			"Rev": "44145f04b68cf362d9c4df2182967c2275eaefed"
+		},
+		{
+			"ImportPath": "github.com/hashicorp/consul/api",
+			"Comment": "v0.5.2-159-gc34bcb4",
+			"Rev": "c34bcb45c670af076846826ea72c436fbd0e2c35"
+		},
+		{
+			"ImportPath": "golang.org/x/net/context",
+			"Rev": "446d52dd4018303a13b36097e26d0888aca5d6ef"
+		}
+	]
+}
