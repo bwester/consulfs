@@ -63,8 +63,7 @@ const MaxWriteAttempts = 10
 
 // File is a single file's inode in the filesystem. It is backed by a key in Consul.
 type File struct {
-	ConsulFs   *ConsulFs
-	fs.NodeRef // Included in a File to help fuse.fs track this File
+	ConsulFs *ConsulFs
 
 	// Mutex guards all mutable metadata
 	Mutex   sync.Mutex
@@ -474,8 +473,6 @@ type Dir struct {
 	readIndex uint64
 	files     map[string]*File
 	dirs      map[string]*Dir
-
-	fs.NodeRef
 }
 
 func (dir *Dir) NewFile(key string) *File {

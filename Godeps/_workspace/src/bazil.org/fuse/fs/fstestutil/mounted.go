@@ -17,7 +17,8 @@ type Mount struct {
 	// Dir is the temporary directory where the filesystem is mounted.
 	Dir string
 
-	Conn *fuse.Conn
+	Conn   *fuse.Conn
+	Server *fs.Server
 
 	// Error will receive the return value of Serve.
 	Error <-chan error
@@ -49,13 +50,15 @@ func (mnt *Mount) Close() {
 	os.Remove(mnt.Dir)
 }
 
-// Mounted mounts the fuse.Server at a temporary directory.
+// MountedFunc mounts a filesystem at a temporary directory. The
+// filesystem used is constructed by calling a function, to allow
+// storing fuse.Conn and fs.Server in the FS.
 //
 // It also waits until the filesystem is known to be visible (OS X
 // workaround).
 //
 // After successful return, caller must clean up by calling Close.
-func Mounted(srv *fs.Server, options ...fuse.MountOption) (*Mount, error) {
+func MountedFunc(fn func(*Mount) fs.FS, conf *fs.Config, options ...fuse.MountOption) (*Mount, error) {
 	dir, err := ioutil.TempDir("", "fusetest")
 	if err != nil {
 		return nil, err
@@ -64,18 +67,20 @@ func Mounted(srv *fs.Server, options ...fuse.MountOption) (*Mount, error) {
 	if err != nil {
 		return nil, err
 	}
-
+	server := fs.New(c, conf)
 	done := make(chan struct{})
 	serveErr := make(chan error, 1)
 	mnt := &Mount{
-		Dir:   dir,
-		Conn:  c,
-		Error: serveErr,
-		done:  done,
+		Dir:    dir,
+		Conn:   c,
+		Server: server,
+		Error:  serveErr,
+		done:   done,
 	}
+	filesys := fn(mnt)
 	go func() {
 		defer close(done)
-		serveErr <- srv.Serve(c)
+		serveErr <- server.Serve(filesys)
 	}()
 
 	select {
@@ -93,6 +98,36 @@ func Mounted(srv *fs.Server, options ...fuse.MountOption) (*Mount, error) {
 	}
 }
 
+// Mounted mounts the fuse.Server at a temporary directory.
+//
+// It also waits until the filesystem is known to be visible (OS X
+// workaround).
+//
+// After successful return, caller must clean up by calling Close.
+func Mounted(filesys fs.FS, conf *fs.Config, options ...fuse.MountOption) (*Mount, error) {
+	fn := func(*Mount) fs.FS { return filesys }
+	return MountedFunc(fn, conf, options...)
+}
+
+// MountedFuncT mounts a filesystem at a temporary directory,
+// directing it's debug log to the testing logger.
+//
+// See MountedFunc for usage.
+//
+// The debug log is not enabled by default. Use `-fuse.debug` or call
+// DebugByDefault to enable.
+func MountedFuncT(t testing.TB, fn func(*Mount) fs.FS, conf *fs.Config, options ...fuse.MountOption) (*Mount, error) {
+	if conf == nil {
+		conf = &fs.Config{}
+	}
+	if debug && conf.Debug == nil {
+		conf.Debug = func(msg interface{}) {
+			t.Logf("FUSE: %s", msg)
+		}
+	}
+	return MountedFunc(fn, conf, options...)
+}
+
 // MountedT mounts the filesystem at a temporary directory,
 // directing it's debug log to the testing logger.
 //
@@ -100,14 +135,7 @@ func Mounted(srv *fs.Server, options ...fuse.MountOption) (*Mount, error) {
 //
 // The debug log is not enabled by default. Use `-fuse.debug` or call
 // DebugByDefault to enable.
-func MountedT(t testing.TB, filesys fs.FS, options ...fuse.MountOption) (*Mount, error) {
-	srv := &fs.Server{
-		FS: filesys,
-	}
-	if debug {
-		srv.Debug = func(msg interface{}) {
-			t.Logf("FUSE: %s", msg)
-		}
-	}
-	return Mounted(srv, options...)
+func MountedT(t testing.TB, filesys fs.FS, conf *fs.Config, options ...fuse.MountOption) (*Mount, error) {
+	fn := func(*Mount) fs.FS { return filesys }
+	return MountedFuncT(t, fn, conf, options...)
 }

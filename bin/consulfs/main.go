@@ -86,14 +86,13 @@ func main() {
 	}()
 
 	// Create a file system object and start handing its requests
+	server := fs.New(conn, &fs.Config{
+		Debug: func(m interface{}) { glog.Info(m) },
+	})
 	f := &consulfs.ConsulFs{
 		Consul: &consulfs.CancelConsulKv{Client: client},
 	}
-	server := fs.Server{
-		FS:    f,
-		Debug: func(m interface{}) { glog.Info(m) },
-	}
-	err = server.Serve(conn)
+	err = server.Serve(f)
 	if err != nil {
 		// Not sure what would cause Serve() to exit with an error
 		glog.Error("filesystem error: ", err)

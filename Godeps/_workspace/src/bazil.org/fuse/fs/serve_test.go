@@ -8,9 +8,11 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path"
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -56,6 +58,25 @@ func (f fifo) Attr(ctx context.Context, a *fuse.Attr) error {
 	return nil
 }
 
+func TestMountpointDoesNotExist(t *testing.T) {
+	t.Parallel()
+	tmp, err := ioutil.TempDir("", "fusetest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmp)
+
+	mountpoint := path.Join(tmp, "does-not-exist")
+	conn, err := fuse.Mount(mountpoint)
+	if err == nil {
+		conn.Close()
+		t.Fatalf("expected error with non-existent mountpoint")
+	}
+	if _, ok := err.(*fuse.MountpointDoesNotExistError); !ok {
+		t.Fatalf("wrong error from mount: %T: %v", err, err)
+	}
+}
+
 type badRootFS struct{}
 
 func (badRootFS) Root() (fs.Node, error) {
@@ -65,7 +86,7 @@ func (badRootFS) Root() (fs.Node, error) {
 
 func TestRootErr(t *testing.T) {
 	t.Parallel()
-	mnt, err := fstestutil.MountedT(t, badRootFS{})
+	mnt, err := fstestutil.MountedT(t, badRootFS{}, nil)
 	if err == nil {
 		// path for synchronous mounts (linux): started out fine, now
 		// wait for Serve to cycle through
@@ -116,7 +137,7 @@ func (f testPanic) Mkdir(ctx context.Context, req *fuse.MkdirRequest) (fs.Node, 
 
 func TestPanic(t *testing.T) {
 	t.Parallel()
-	mnt, err := fstestutil.MountedT(t, testPanic{})
+	mnt, err := fstestutil.MountedT(t, testPanic{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +169,7 @@ func (f testStatFS) Statfs(ctx context.Context, req *fuse.StatfsRequest, resp *f
 
 func TestStatfs(t *testing.T) {
 	t.Parallel()
-	mnt, err := fstestutil.MountedT(t, testStatFS{})
+	mnt, err := fstestutil.MountedT(t, testStatFS{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,12 +231,14 @@ func (f root) Root() (fs.Node, error) {
 func (root) Attr(ctx context.Context, a *fuse.Attr) error {
 	a.Inode = 1
 	a.Mode = os.ModeDir | 0555
+	// This has to be a power of two, but try to pick something that's an unlikely default.
+	a.BlockSize = 65536
 	return nil
 }
 
 func TestStatRoot(t *testing.T) {
 	t.Parallel()
-	mnt, err := fstestutil.MountedT(t, root{})
+	mnt, err := fstestutil.MountedT(t, root{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,6 +269,13 @@ func TestStatRoot(t *testing.T) {
 		if stat.Gid != 0 {
 			t.Errorf("root has wrong gid: %d", stat.Gid)
 		}
+		if mnt.Conn.Protocol().HasAttrBlockSize() {
+			// convert stat.Blksize too because it's int64 on Linux but
+			// int32 on Darwin.
+			if g, e := int64(stat.Blksize), int64(65536); g != e {
+				t.Errorf("root has wrong blocksize: %d != %d", g, e)
+			}
+		}
 	}
 }
 
@@ -268,18 +298,24 @@ func (readAll) ReadAll(ctx context.Context) ([]byte, error) {
 }
 
 func testReadAll(t *testing.T, path string) {
-	data, err := ioutil.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
-		t.Fatalf("readAll: %v", err)
+		t.Fatal(err)
 	}
-	if string(data) != hi {
+	defer f.Close()
+	data := make([]byte, 4096)
+	n, err := f.Read(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data[:n]) != hi {
 		t.Errorf("readAll = %q, want %q", data, hi)
 	}
 }
 
 func TestReadAll(t *testing.T) {
 	t.Parallel()
-	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{fstestutil.ChildMap{"child": readAll{}}})
+	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{&fstestutil.ChildMap{"child": readAll{}}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -307,13 +343,130 @@ func (readWithHandleRead) Read(ctx context.Context, req *fuse.ReadRequest, resp 
 
 func TestReadAllWithHandleRead(t *testing.T) {
 	t.Parallel()
-	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{fstestutil.ChildMap{"child": readWithHandleRead{}}})
+	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{&fstestutil.ChildMap{"child": readWithHandleRead{}}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer mnt.Close()
 
 	testReadAll(t, mnt.Dir+"/child")
+}
+
+type readFlags struct {
+	fstestutil.File
+	fileFlags record.Recorder
+}
+
+func (r *readFlags) Attr(ctx context.Context, a *fuse.Attr) error {
+	a.Mode = 0666
+	a.Size = uint64(len(hi))
+	return nil
+}
+
+func (r *readFlags) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse.ReadResponse) error {
+	r.fileFlags.Record(req.FileFlags)
+	fuseutil.HandleRead(req, resp, []byte(hi))
+	return nil
+}
+
+func TestReadFileFlags(t *testing.T) {
+	t.Parallel()
+	r := &readFlags{}
+	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{&fstestutil.ChildMap{"child": r}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mnt.Close()
+
+	if !mnt.Conn.Protocol().HasReadWriteFlags() {
+		t.Skip("Old FUSE protocol")
+	}
+
+	f, err := os.OpenFile(mnt.Dir+"/child", os.O_RDWR|os.O_APPEND, 0666)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.Read(make([]byte, 4096)); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
+
+	want := fuse.OpenReadWrite | fuse.OpenAppend
+	if runtime.GOOS == "darwin" {
+		// OSXFUSE shares one read and one write handle for all
+		// clients, so it uses a OpenReadOnly handle for performing
+		// our read.
+		//
+		// If this test starts failing in the future, that probably
+		// means they added the feature, and we want to notice that!
+		want = fuse.OpenReadOnly
+	}
+	if g, e := r.fileFlags.Recorded().(fuse.OpenFlags), want; g != e {
+		t.Errorf("read saw file flags %+v, want %+v", g, e)
+	}
+}
+
+type writeFlags struct {
+	fstestutil.File
+	fileFlags record.Recorder
+}
+
+func (r *writeFlags) Attr(ctx context.Context, a *fuse.Attr) error {
+	a.Mode = 0666
+	a.Size = uint64(len(hi))
+	return nil
+}
+
+func (r *writeFlags) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse.ReadResponse) error {
+	// OSXFUSE 3.0.4 does a read-modify-write cycle even when the
+	// write was for 4096 bytes.
+	fuseutil.HandleRead(req, resp, []byte(hi))
+	return nil
+}
+
+func (r *writeFlags) Write(ctx context.Context, req *fuse.WriteRequest, resp *fuse.WriteResponse) error {
+	r.fileFlags.Record(req.FileFlags)
+	resp.Size = len(req.Data)
+	return nil
+}
+
+func TestWriteFileFlags(t *testing.T) {
+	t.Parallel()
+	r := &writeFlags{}
+	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{&fstestutil.ChildMap{"child": r}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mnt.Close()
+
+	if !mnt.Conn.Protocol().HasReadWriteFlags() {
+		t.Skip("Old FUSE protocol")
+	}
+
+	f, err := os.OpenFile(mnt.Dir+"/child", os.O_RDWR|os.O_APPEND, 0666)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.Write(make([]byte, 4096)); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
+
+	want := fuse.OpenReadWrite | fuse.OpenAppend
+	if runtime.GOOS == "darwin" {
+		// OSXFUSE shares one read and one write handle for all
+		// clients, so it uses a OpenWriteOnly handle for performing
+		// our read.
+		//
+		// If this test starts failing in the future, that probably
+		// means they added the feature, and we want to notice that!
+		want = fuse.OpenWriteOnly
+	}
+	if g, e := r.fileFlags.Recorded().(fuse.OpenFlags), want; g != e {
+		t.Errorf("write saw file flags %+v, want %+v", g, e)
+	}
 }
 
 // Test Release.
@@ -326,7 +479,7 @@ type release struct {
 func TestRelease(t *testing.T) {
 	t.Parallel()
 	r := &release{}
-	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{fstestutil.ChildMap{"child": r}})
+	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{&fstestutil.ChildMap{"child": r}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -353,7 +506,7 @@ type write struct {
 func TestWrite(t *testing.T) {
 	t.Parallel()
 	w := &write{}
-	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{fstestutil.ChildMap{"child": w}})
+	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{&fstestutil.ChildMap{"child": w}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -400,7 +553,7 @@ type writeLarge struct {
 func TestWriteLarge(t *testing.T) {
 	t.Parallel()
 	w := &write{}
-	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{fstestutil.ChildMap{"child": w}})
+	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{&fstestutil.ChildMap{"child": w}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -447,7 +600,7 @@ type writeTruncateFlush struct {
 func TestWriteTruncateFlush(t *testing.T) {
 	t.Parallel()
 	w := &writeTruncateFlush{}
-	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{fstestutil.ChildMap{"child": w}})
+	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{&fstestutil.ChildMap{"child": w}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -483,7 +636,7 @@ func (f *mkdir1) Mkdir(ctx context.Context, req *fuse.MkdirRequest) (fs.Node, er
 func TestMkdir(t *testing.T) {
 	t.Parallel()
 	f := &mkdir1{}
-	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{f})
+	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{f}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -497,6 +650,13 @@ func TestMkdir(t *testing.T) {
 		t.Fatalf("mkdir: %v", err)
 	}
 	want := fuse.MkdirRequest{Name: "foo", Mode: os.ModeDir | 0751}
+	if mnt.Conn.Protocol().HasUmask() {
+		want.Umask = 0022
+	}
+	if runtime.GOOS == "darwin" {
+		// https://github.com/osxfuse/osxfuse/issues/225
+		want.Umask = 0
+	}
 	if g, e := f.RecordedMkdir(), want; g != e {
 		t.Errorf("mkdir saw %+v, want %+v", g, e)
 	}
@@ -506,6 +666,7 @@ func TestMkdir(t *testing.T) {
 
 type create1file struct {
 	fstestutil.File
+	record.Creates
 	record.Fsyncs
 }
 
@@ -519,33 +680,15 @@ func (f *create1) Create(ctx context.Context, req *fuse.CreateRequest, resp *fus
 		log.Printf("ERROR create1.Create unexpected name: %q\n", req.Name)
 		return nil, nil, fuse.EPERM
 	}
-	flags := req.Flags
 
-	// OS X does not pass O_TRUNC here, Linux does; as this is a
-	// Create, that's acceptable
-	flags &^= fuse.OpenTruncate
-
-	if runtime.GOOS == "linux" {
-		// Linux <3.7 accidentally leaks O_CLOEXEC through to FUSE;
-		// avoid spurious test failures
-		flags &^= fuse.OpenFlags(syscall.O_CLOEXEC)
-	}
-
-	if g, e := flags, fuse.OpenReadWrite|fuse.OpenCreate; g != e {
-		log.Printf("ERROR create1.Create unexpected flags: %v != %v\n", g, e)
-		return nil, nil, fuse.EPERM
-	}
-	if g, e := req.Mode, os.FileMode(0644); g != e {
-		log.Printf("ERROR create1.Create unexpected mode: %v != %v\n", g, e)
-		return nil, nil, fuse.EPERM
-	}
+	_, _, _ = f.f.Creates.Create(ctx, req, resp)
 	return &f.f, &f.f, nil
 }
 
 func TestCreate(t *testing.T) {
 	t.Parallel()
 	f := &create1{}
-	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{f})
+	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{f}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -554,11 +697,37 @@ func TestCreate(t *testing.T) {
 	// uniform umask needed to make os.Create's 0666 into something
 	// reproducible
 	defer syscall.Umask(syscall.Umask(0022))
-	ff, err := os.Create(mnt.Dir + "/foo")
+	ff, err := os.OpenFile(mnt.Dir+"/foo", os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0640)
 	if err != nil {
 		t.Fatalf("create1 WriteFile: %v", err)
 	}
 	defer ff.Close()
+
+	want := fuse.CreateRequest{
+		Name:  "foo",
+		Flags: fuse.OpenReadWrite | fuse.OpenCreate | fuse.OpenTruncate,
+		Mode:  0640,
+	}
+	if mnt.Conn.Protocol().HasUmask() {
+		want.Umask = 0022
+	}
+	if runtime.GOOS == "darwin" {
+		// OS X does not pass O_TRUNC here, Linux does; as this is a
+		// Create, that's acceptable
+		want.Flags &^= fuse.OpenTruncate
+
+		// https://github.com/osxfuse/osxfuse/issues/225
+		want.Umask = 0
+	}
+	got := f.f.RecordedCreate()
+	if runtime.GOOS == "linux" {
+		// Linux <3.7 accidentally leaks O_CLOEXEC through to FUSE;
+		// avoid spurious test failures
+		got.Flags &^= fuse.OpenFlags(syscall.O_CLOEXEC)
+	}
+	if g, e := got, want; g != e {
+		t.Fatalf("create saw %+v, want %+v", g, e)
+	}
 
 	err = syscall.Fsync(int(ff.Fd()))
 	if err != nil {
@@ -614,7 +783,7 @@ func (f *create3) Remove(ctx context.Context, r *fuse.RemoveRequest) error {
 func TestCreateWriteRemove(t *testing.T) {
 	t.Parallel()
 	f := &create3{}
-	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{f})
+	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{f}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -663,7 +832,7 @@ func (f *symlink1) Symlink(ctx context.Context, req *fuse.SymlinkRequest) (fs.No
 func TestSymlink(t *testing.T) {
 	t.Parallel()
 	f := &symlink1{}
-	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{f})
+	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{f}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -712,7 +881,7 @@ func (f *link1) Link(ctx context.Context, r *fuse.LinkRequest, old fs.Node) (fs.
 func TestLink(t *testing.T) {
 	t.Parallel()
 	f := &link1{}
-	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{f})
+	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{f}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -759,7 +928,7 @@ func (f *rename1) Rename(ctx context.Context, r *fuse.RenameRequest, newDir fs.N
 func TestRename(t *testing.T) {
 	t.Parallel()
 	f := &rename1{}
-	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{f})
+	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{f}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -797,21 +966,21 @@ func TestMknod(t *testing.T) {
 	}
 
 	f := &mknod1{}
-	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{f})
+	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{f}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer mnt.Close()
 
-	defer syscall.Umask(syscall.Umask(0))
-	err = syscall.Mknod(mnt.Dir+"/node", syscall.S_IFIFO|0666, 123)
+	defer syscall.Umask(syscall.Umask(0022))
+	err = syscall.Mknod(mnt.Dir+"/node", syscall.S_IFIFO|0660, 123)
 	if err != nil {
-		t.Fatalf("Mknod: %v", err)
+		t.Fatalf("mknod: %v", err)
 	}
 
 	want := fuse.MknodRequest{
 		Name: "node",
-		Mode: os.FileMode(os.ModeNamedPipe | 0666),
+		Mode: os.FileMode(os.ModeNamedPipe | 0640),
 		Rdev: uint32(123),
 	}
 	if runtime.GOOS == "linux" {
@@ -819,6 +988,13 @@ func TestMknod(t *testing.T) {
 		// isn't a device (we're using a FIFO here, as that
 		// bit is portable.)
 		want.Rdev = 0
+	}
+	if mnt.Conn.Protocol().HasUmask() {
+		want.Umask = 0022
+	}
+	if runtime.GOOS == "darwin" {
+		// https://github.com/osxfuse/osxfuse/issues/225
+		want.Umask = 0
 	}
 	if g, e := f.RecordedMknod(), want; g != e {
 		t.Fatalf("mknod saw %+v, want %+v", g, e)
@@ -844,7 +1020,7 @@ func (dataHandleTest) Open(ctx context.Context, req *fuse.OpenRequest, resp *fus
 func TestDataHandle(t *testing.T) {
 	t.Parallel()
 	f := &dataHandleTest{}
-	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{fstestutil.ChildMap{"child": f}})
+	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{&fstestutil.ChildMap{"child": f}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -888,7 +1064,7 @@ func TestInterrupt(t *testing.T) {
 	t.Parallel()
 	f := &interrupt{}
 	f.hanging = make(chan struct{}, 1)
-	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{fstestutil.ChildMap{"child": f}})
+	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{&fstestutil.ChildMap{"child": f}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -952,7 +1128,7 @@ type truncate struct {
 func testTruncate(t *testing.T, toSize int64) {
 	t.Parallel()
 	f := &truncate{}
-	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{fstestutil.ChildMap{"child": f}})
+	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{&fstestutil.ChildMap{"child": f}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -993,7 +1169,7 @@ type ftruncate struct {
 func testFtruncate(t *testing.T, toSize int64) {
 	t.Parallel()
 	f := &ftruncate{}
-	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{fstestutil.ChildMap{"child": f}})
+	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{&fstestutil.ChildMap{"child": f}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1043,7 +1219,7 @@ type truncateWithOpen struct {
 func TestTruncateWithOpen(t *testing.T) {
 	t.Parallel()
 	f := &truncateWithOpen{}
-	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{fstestutil.ChildMap{"child": f}})
+	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{&fstestutil.ChildMap{"child": f}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1087,7 +1263,7 @@ func (d *readDirAll) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 func TestReadDirAll(t *testing.T) {
 	t.Parallel()
 	f := &readDirAll{}
-	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{f})
+	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{f}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1120,6 +1296,58 @@ func TestReadDirAll(t *testing.T) {
 	}
 }
 
+type readDirAllBad struct {
+	fstestutil.Dir
+}
+
+func (d *readDirAllBad) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
+	r := []fuse.Dirent{
+		{Name: "one", Inode: 11, Type: fuse.DT_Dir},
+		{Name: "three", Inode: 13},
+		{Name: "two", Inode: 12, Type: fuse.DT_File},
+	}
+	// pick a really distinct error, to identify it later
+	return r, fuse.Errno(syscall.ENAMETOOLONG)
+}
+
+func TestReadDirAllBad(t *testing.T) {
+	t.Parallel()
+	f := &readDirAllBad{}
+	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{f}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mnt.Close()
+
+	fil, err := os.Open(mnt.Dir)
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	defer fil.Close()
+
+	var names []string
+	for {
+		n, err := fil.Readdirnames(1)
+		if err != nil {
+			if nerr, ok := err.(*os.SyscallError); !ok || nerr.Err != syscall.ENAMETOOLONG {
+				t.Fatalf("wrong error: %v", err)
+			}
+			break
+		}
+		names = append(names, n...)
+	}
+
+	t.Logf("Got readdir: %q", names)
+
+	// TODO could serve partial results from ReadDirAll but the
+	// shandle.readData mechanism makes that awkward.
+	if len(names) != 0 {
+		t.Errorf(`expected 0 entries, got: %q`, names)
+		return
+	}
+}
+
 // Test readdir without any ReadDir methods implemented.
 
 type readDirNotImplemented struct {
@@ -1129,7 +1357,7 @@ type readDirNotImplemented struct {
 func TestReadDirNotImplemented(t *testing.T) {
 	t.Parallel()
 	f := &readDirNotImplemented{}
-	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{f})
+	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{f}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1170,7 +1398,7 @@ func (f *chmod) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *fus
 func TestChmod(t *testing.T) {
 	t.Parallel()
 	f := &chmod{}
-	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{fstestutil.ChildMap{"child": f}})
+	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{&fstestutil.ChildMap{"child": f}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1203,7 +1431,7 @@ func (f *open) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenR
 func TestOpen(t *testing.T) {
 	t.Parallel()
 	f := &open{}
-	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{fstestutil.ChildMap{"child": f}})
+	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{&fstestutil.ChildMap{"child": f}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1250,6 +1478,44 @@ func TestOpen(t *testing.T) {
 	}
 }
 
+type openNonSeekable struct {
+	fstestutil.File
+}
+
+func (f *openNonSeekable) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenResponse) (fs.Handle, error) {
+	resp.Flags |= fuse.OpenNonSeekable
+	return f, nil
+}
+
+func TestOpenNonSeekable(t *testing.T) {
+	if runtime.GOOS == "darwin" {
+		t.Skip("OSXFUSE shares one read and one write handle for all clients, does not support open modes")
+	}
+
+	t.Parallel()
+	f := &openNonSeekable{}
+	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{&fstestutil.ChildMap{"child": f}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mnt.Close()
+
+	if !mnt.Conn.Protocol().HasOpenNonSeekable() {
+		t.Skip("Old FUSE protocol")
+	}
+
+	fil, err := os.Open(mnt.Dir + "/child")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fil.Close()
+
+	_, err = fil.Seek(0, os.SEEK_SET)
+	if nerr, ok := err.(*os.PathError); !ok || nerr.Err != syscall.ESPIPE {
+		t.Fatalf("wrong error: %v", err)
+	}
+}
+
 // Test Fsync on a dir
 
 type fsyncDir struct {
@@ -1260,7 +1526,7 @@ type fsyncDir struct {
 func TestFsyncDir(t *testing.T) {
 	t.Parallel()
 	f := &fsyncDir{}
-	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{f})
+	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{f}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1311,7 +1577,7 @@ func (f *getxattr) Getxattr(ctx context.Context, req *fuse.GetxattrRequest, resp
 func TestGetxattr(t *testing.T) {
 	t.Parallel()
 	f := &getxattr{}
-	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{fstestutil.ChildMap{"child": f}})
+	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{&fstestutil.ChildMap{"child": f}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1347,7 +1613,7 @@ func (f *getxattrTooSmall) Getxattr(ctx context.Context, req *fuse.GetxattrReque
 func TestGetxattrTooSmall(t *testing.T) {
 	t.Parallel()
 	f := &getxattrTooSmall{}
-	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{fstestutil.ChildMap{"child": f}})
+	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{&fstestutil.ChildMap{"child": f}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1378,7 +1644,7 @@ func (f *getxattrSize) Getxattr(ctx context.Context, req *fuse.GetxattrRequest, 
 func TestGetxattrSize(t *testing.T) {
 	t.Parallel()
 	f := &getxattrSize{}
-	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{fstestutil.ChildMap{"child": f}})
+	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{&fstestutil.ChildMap{"child": f}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1410,7 +1676,7 @@ func (f *listxattr) Listxattr(ctx context.Context, req *fuse.ListxattrRequest, r
 func TestListxattr(t *testing.T) {
 	t.Parallel()
 	f := &listxattr{}
-	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{fstestutil.ChildMap{"child": f}})
+	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{&fstestutil.ChildMap{"child": f}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1449,7 +1715,7 @@ func (f *listxattrTooSmall) Listxattr(ctx context.Context, req *fuse.ListxattrRe
 func TestListxattrTooSmall(t *testing.T) {
 	t.Parallel()
 	f := &listxattrTooSmall{}
-	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{fstestutil.ChildMap{"child": f}})
+	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{&fstestutil.ChildMap{"child": f}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1480,7 +1746,7 @@ func (f *listxattrSize) Listxattr(ctx context.Context, req *fuse.ListxattrReques
 func TestListxattrSize(t *testing.T) {
 	t.Parallel()
 	f := &listxattrSize{}
-	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{fstestutil.ChildMap{"child": f}})
+	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{&fstestutil.ChildMap{"child": f}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1511,7 +1777,7 @@ func testSetxattr(t *testing.T, size int) {
 
 	t.Parallel()
 	f := &setxattr{}
-	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{fstestutil.ChildMap{"child": f}})
+	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{&fstestutil.ChildMap{"child": f}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1564,7 +1830,7 @@ type removexattr struct {
 func TestRemovexattr(t *testing.T) {
 	t.Parallel()
 	f := &removexattr{}
-	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{fstestutil.ChildMap{"child": f}})
+	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{&fstestutil.ChildMap{"child": f}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1594,7 +1860,7 @@ func (f defaultErrno) Lookup(ctx context.Context, name string) (fs.Node, error) 
 
 func TestDefaultErrno(t *testing.T) {
 	t.Parallel()
-	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{defaultErrno{}})
+	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{defaultErrno{}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1640,7 +1906,7 @@ func (f customErrNode) Lookup(ctx context.Context, name string) (fs.Node, error)
 
 func TestCustomErrno(t *testing.T) {
 	t.Parallel()
-	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{customErrNode{}})
+	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{customErrNode{}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1761,7 +2027,7 @@ func TestMmap(t *testing.T) {
 
 	w := &mmap{}
 	w.data = make([]byte, mmapSize)
-	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{fstestutil.ChildMap{"child": w}})
+	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{&fstestutil.ChildMap{"child": w}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1814,7 +2080,7 @@ func (directRead) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse.Re
 
 func TestDirectRead(t *testing.T) {
 	t.Parallel()
-	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{fstestutil.ChildMap{"child": directRead{}}})
+	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{&fstestutil.ChildMap{"child": directRead{}}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1841,7 +2107,7 @@ func (f *directWrite) Open(ctx context.Context, req *fuse.OpenRequest, resp *fus
 func TestDirectWrite(t *testing.T) {
 	t.Parallel()
 	w := &directWrite{}
-	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{fstestutil.ChildMap{"child": w}})
+	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{&fstestutil.ChildMap{"child": w}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1889,7 +2155,7 @@ func (f attrUnlinked) Attr(ctx context.Context, a *fuse.Attr) error {
 
 func TestAttrUnlinked(t *testing.T) {
 	t.Parallel()
-	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{fstestutil.ChildMap{"child": attrUnlinked{}}})
+	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{&fstestutil.ChildMap{"child": attrUnlinked{}}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1920,7 +2186,7 @@ func (attrBad) Attr(ctx context.Context, attr *fuse.Attr) error {
 
 func TestAttrBad(t *testing.T) {
 	t.Parallel()
-	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{fstestutil.ChildMap{"child": attrBad{}}})
+	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{&fstestutil.ChildMap{"child": attrBad{}}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1929,5 +2195,460 @@ func TestAttrBad(t *testing.T) {
 	_, err = os.Stat(mnt.Dir + "/child")
 	if nerr, ok := err.(*os.PathError); !ok || nerr.Err != syscall.ENAMETOOLONG {
 		t.Fatalf("wrong error: %v", err)
+	}
+}
+
+// Test kernel cache invalidation
+
+type invalidateAttr struct {
+	fs.NodeRef
+	t    testing.TB
+	attr record.Counter
+}
+
+var _ fs.Node = (*invalidateAttr)(nil)
+
+func (i *invalidateAttr) Attr(ctx context.Context, a *fuse.Attr) error {
+	i.attr.Inc()
+	i.t.Logf("Attr called, #%d", i.attr.Count())
+	a.Mode = 0600
+	return nil
+}
+
+func TestInvalidateNodeAttr(t *testing.T) {
+	// This test may see false positive failures when run under
+	// extreme memory pressure.
+	t.Parallel()
+	a := &invalidateAttr{
+		t: t,
+	}
+	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{&fstestutil.ChildMap{"child": a}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mnt.Close()
+
+	if !mnt.Conn.Protocol().HasInvalidate() {
+		t.Skip("Old FUSE protocol")
+	}
+
+	for i := 0; i < 10; i++ {
+		if _, err := os.Stat(mnt.Dir + "/child"); err != nil {
+			t.Fatalf("stat error: %v", err)
+		}
+	}
+	// With OSXFUSE 3.0.4, we seem to see typically two Attr calls by
+	// this point; something not populating the in-kernel cache
+	// properly? Cope with it; we care more about seeing a new Attr
+	// call after the invalidation.
+	//
+	// We still enforce a max number here so that we know that the
+	// invalidate actually did something, and it's not just that every
+	// Stat results in an Attr.
+	before := a.attr.Count()
+	if before == 0 {
+		t.Error("no Attr call seen")
+	}
+	if g, e := before, uint32(3); g > e {
+		t.Errorf("too many Attr calls seen: %d > %d", g, e)
+	}
+
+	t.Logf("invalidating...")
+	if err := mnt.Server.InvalidateNodeAttr(a); err != nil {
+		t.Fatalf("invalidate error: %v", err)
+	}
+
+	for i := 0; i < 10; i++ {
+		if _, err := os.Stat(mnt.Dir + "/child"); err != nil {
+			t.Fatalf("stat error: %v", err)
+		}
+	}
+	if g, e := a.attr.Count(), before+1; g != e {
+		t.Errorf("wrong Attr call count: %d != %d", g, e)
+	}
+}
+
+type invalidateData struct {
+	fs.NodeRef
+	t    testing.TB
+	attr record.Counter
+	read record.Counter
+	data atomic.Value
+}
+
+const (
+	invalidateDataContent1 = "hello, world\n"
+	invalidateDataContent2 = "so long!\n"
+)
+
+var _ fs.Node = (*invalidateData)(nil)
+
+func (i *invalidateData) Attr(ctx context.Context, a *fuse.Attr) error {
+	i.attr.Inc()
+	i.t.Logf("Attr called, #%d", i.attr.Count())
+	a.Mode = 0600
+	a.Size = uint64(len(i.data.Load().(string)))
+	return nil
+}
+
+var _ fs.HandleReader = (*invalidateData)(nil)
+
+func (i *invalidateData) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse.ReadResponse) error {
+	i.read.Inc()
+	i.t.Logf("Read called, #%d", i.read.Count())
+	fuseutil.HandleRead(req, resp, []byte(i.data.Load().(string)))
+	return nil
+}
+
+func TestInvalidateNodeDataInvalidatesAttr(t *testing.T) {
+	// This test may see false positive failures when run under
+	// extreme memory pressure.
+	t.Parallel()
+	a := &invalidateData{
+		t: t,
+	}
+	a.data.Store(invalidateDataContent1)
+	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{&fstestutil.ChildMap{"child": a}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mnt.Close()
+
+	if !mnt.Conn.Protocol().HasInvalidate() {
+		t.Skip("Old FUSE protocol")
+	}
+
+	f, err := os.Open(mnt.Dir + "/child")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	attrBefore := a.attr.Count()
+	if g, min := attrBefore, uint32(1); g < min {
+		t.Errorf("wrong Attr call count: %d < %d", g, min)
+	}
+
+	t.Logf("invalidating...")
+	a.data.Store(invalidateDataContent2)
+	if err := mnt.Server.InvalidateNodeData(a); err != nil {
+		t.Fatalf("invalidate error: %v", err)
+	}
+
+	// on OSXFUSE 3.0.6, the Attr has already triggered here, so don't
+	// check the count at this point
+
+	if _, err := f.Stat(); err != nil {
+		t.Errorf("stat error: %v", err)
+	}
+	if g, prev := a.attr.Count(), attrBefore; g <= prev {
+		t.Errorf("did not see Attr call after invalidate: %d <= %d", g, prev)
+	}
+}
+
+func TestInvalidateNodeDataInvalidatesData(t *testing.T) {
+	// This test may see false positive failures when run under
+	// extreme memory pressure.
+	t.Parallel()
+	a := &invalidateData{
+		t: t,
+	}
+	a.data.Store(invalidateDataContent1)
+	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{&fstestutil.ChildMap{"child": a}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mnt.Close()
+
+	if !mnt.Conn.Protocol().HasInvalidate() {
+		t.Skip("Old FUSE protocol")
+	}
+
+	f, err := os.Open(mnt.Dir + "/child")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	{
+		buf := make([]byte, 100)
+		for i := 0; i < 10; i++ {
+			n, err := f.ReadAt(buf, 0)
+			if err != nil && err != io.EOF {
+				t.Fatalf("readat error: %v", err)
+			}
+			if g, e := string(buf[:n]), invalidateDataContent1; g != e {
+				t.Errorf("wrong content: %q != %q", g, e)
+			}
+		}
+	}
+	if g, e := a.read.Count(), uint32(1); g != e {
+		t.Errorf("wrong Read call count: %d != %d", g, e)
+	}
+
+	t.Logf("invalidating...")
+	a.data.Store(invalidateDataContent2)
+	if err := mnt.Server.InvalidateNodeData(a); err != nil {
+		t.Fatalf("invalidate error: %v", err)
+	}
+
+	if g, e := a.read.Count(), uint32(1); g != e {
+		t.Errorf("wrong Read call count: %d != %d", g, e)
+	}
+
+	{
+		// explicitly don't cross the EOF, to trigger more edge cases
+		// (Linux will always do Getattr if you cross what it believes
+		// the EOF to be)
+		const bufSize = len(invalidateDataContent2) - 3
+		buf := make([]byte, bufSize)
+		for i := 0; i < 10; i++ {
+			n, err := f.ReadAt(buf, 0)
+			if err != nil && err != io.EOF {
+				t.Fatalf("readat error: %v", err)
+			}
+			if g, e := string(buf[:n]), invalidateDataContent2[:bufSize]; g != e {
+				t.Errorf("wrong content: %q != %q", g, e)
+			}
+		}
+	}
+	if g, e := a.read.Count(), uint32(2); g != e {
+		t.Errorf("wrong Read call count: %d != %d", g, e)
+	}
+}
+
+type invalidateDataPartial struct {
+	fs.NodeRef
+	t    testing.TB
+	attr record.Counter
+	read record.Counter
+}
+
+var invalidateDataPartialContent = strings.Repeat("hello, world\n", 1000)
+
+var _ fs.Node = (*invalidateDataPartial)(nil)
+
+func (i *invalidateDataPartial) Attr(ctx context.Context, a *fuse.Attr) error {
+	i.attr.Inc()
+	i.t.Logf("Attr called, #%d", i.attr.Count())
+	a.Mode = 0600
+	a.Size = uint64(len(invalidateDataPartialContent))
+	return nil
+}
+
+var _ fs.HandleReader = (*invalidateDataPartial)(nil)
+
+func (i *invalidateDataPartial) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse.ReadResponse) error {
+	i.read.Inc()
+	i.t.Logf("Read called, #%d", i.read.Count())
+	fuseutil.HandleRead(req, resp, []byte(invalidateDataPartialContent))
+	return nil
+}
+
+func TestInvalidateNodeDataRangeMiss(t *testing.T) {
+	// This test may see false positive failures when run under
+	// extreme memory pressure.
+	t.Parallel()
+	a := &invalidateDataPartial{
+		t: t,
+	}
+	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{&fstestutil.ChildMap{"child": a}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mnt.Close()
+
+	if !mnt.Conn.Protocol().HasInvalidate() {
+		t.Skip("Old FUSE protocol")
+	}
+
+	f, err := os.Open(mnt.Dir + "/child")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	buf := make([]byte, 4)
+	for i := 0; i < 10; i++ {
+		if _, err := f.ReadAt(buf, 0); err != nil {
+			t.Fatalf("readat error: %v", err)
+		}
+	}
+	if g, e := a.read.Count(), uint32(1); g != e {
+		t.Errorf("wrong Read call count: %d != %d", g, e)
+	}
+
+	t.Logf("invalidating an uninteresting block...")
+	if err := mnt.Server.InvalidateNodeDataRange(a, 4096, 4096); err != nil {
+		t.Fatalf("invalidate error: %v", err)
+	}
+
+	for i := 0; i < 10; i++ {
+		if _, err := f.ReadAt(buf, 0); err != nil {
+			t.Fatalf("readat error: %v", err)
+		}
+	}
+	// The page invalidated is not the page we're reading, so it
+	// should stay in cache.
+	if g, e := a.read.Count(), uint32(1); g != e {
+		t.Errorf("wrong Read call count: %d != %d", g, e)
+	}
+}
+
+func TestInvalidateNodeDataRangeHit(t *testing.T) {
+	// This test may see false positive failures when run under
+	// extreme memory pressure.
+	t.Parallel()
+	a := &invalidateDataPartial{
+		t: t,
+	}
+	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{&fstestutil.ChildMap{"child": a}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mnt.Close()
+
+	if !mnt.Conn.Protocol().HasInvalidate() {
+		t.Skip("Old FUSE protocol")
+	}
+
+	f, err := os.Open(mnt.Dir + "/child")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	const offset = 4096
+	buf := make([]byte, 4)
+	for i := 0; i < 10; i++ {
+		if _, err := f.ReadAt(buf, offset); err != nil {
+			t.Fatalf("readat error: %v", err)
+		}
+	}
+	if g, e := a.read.Count(), uint32(1); g != e {
+		t.Errorf("wrong Read call count: %d != %d", g, e)
+	}
+
+	t.Logf("invalidating where the reads are...")
+	if err := mnt.Server.InvalidateNodeDataRange(a, offset, 4096); err != nil {
+		t.Fatalf("invalidate error: %v", err)
+	}
+
+	for i := 0; i < 10; i++ {
+		if _, err := f.ReadAt(buf, offset); err != nil {
+			t.Fatalf("readat error: %v", err)
+		}
+	}
+	// One new read
+	if g, e := a.read.Count(), uint32(2); g != e {
+		t.Errorf("wrong Read call count: %d != %d", g, e)
+	}
+}
+
+type invalidateEntryRoot struct {
+	fs.NodeRef
+	t      testing.TB
+	lookup record.Counter
+}
+
+var _ fs.Node = (*invalidateEntryRoot)(nil)
+
+func (i *invalidateEntryRoot) Attr(ctx context.Context, a *fuse.Attr) error {
+	a.Mode = 0600 | os.ModeDir
+	return nil
+}
+
+var _ fs.NodeStringLookuper = (*invalidateEntryRoot)(nil)
+
+func (i *invalidateEntryRoot) Lookup(ctx context.Context, name string) (fs.Node, error) {
+	if name != "child" {
+		return nil, fuse.ENOENT
+	}
+	i.lookup.Inc()
+	i.t.Logf("Lookup called, #%d", i.lookup.Count())
+	return fstestutil.File{}, nil
+}
+
+func TestInvalidateEntry(t *testing.T) {
+	// This test may see false positive failures when run under
+	// extreme memory pressure.
+	t.Parallel()
+	a := &invalidateEntryRoot{
+		t: t,
+	}
+	mnt, err := fstestutil.MountedT(t, fstestutil.SimpleFS{a}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mnt.Close()
+
+	if !mnt.Conn.Protocol().HasInvalidate() {
+		t.Skip("Old FUSE protocol")
+	}
+
+	for i := 0; i < 10; i++ {
+		if _, err := os.Stat(mnt.Dir + "/child"); err != nil {
+			t.Fatalf("stat error: %v", err)
+		}
+	}
+	if g, e := a.lookup.Count(), uint32(1); g != e {
+		t.Errorf("wrong Lookup call count: %d != %d", g, e)
+	}
+
+	t.Logf("invalidating...")
+	if err := mnt.Server.InvalidateEntry(a, "child"); err != nil {
+		t.Fatalf("invalidate error: %v", err)
+	}
+
+	for i := 0; i < 10; i++ {
+		if _, err := os.Stat(mnt.Dir + "/child"); err != nil {
+			t.Fatalf("stat error: %v", err)
+		}
+	}
+	if g, e := a.lookup.Count(), uint32(2); g != e {
+		t.Errorf("wrong Lookup call count: %d != %d", g, e)
+	}
+}
+
+type contextFile struct {
+	fstestutil.File
+}
+
+var contextFileSentinel int
+
+func (contextFile) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenResponse) (fs.Handle, error) {
+	v := ctx.Value(&contextFileSentinel)
+	if v == nil {
+		return nil, fuse.ESTALE
+	}
+	data, ok := v.(string)
+	if !ok {
+		return nil, fuse.EIO
+	}
+	resp.Flags |= fuse.OpenDirectIO
+	return fs.DataHandle([]byte(data)), nil
+}
+
+func TestContext(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	const input = "kilroy was here"
+	ctx = context.WithValue(ctx, &contextFileSentinel, input)
+	mnt, err := fstestutil.MountedT(t,
+		fstestutil.SimpleFS{&fstestutil.ChildMap{"child": contextFile{}}},
+		&fs.Config{
+			GetContext: func() context.Context { return ctx },
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mnt.Close()
+
+	data, err := ioutil.ReadFile(mnt.Dir + "/child")
+	if err != nil {
+		t.Fatalf("cannot read context file: %v", err)
+	}
+	if g, e := string(data), input; g != e {
+		t.Errorf("read wrong data: %q != %q", g, e)
 	}
 }

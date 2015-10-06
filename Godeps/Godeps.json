@@ -7,20 +7,20 @@
 	"Deps": [
 		{
 			"ImportPath": "bazil.org/fuse",
-			"Rev": "ad3456914df591ff11619d585104b48f779fd7fa"
+			"Rev": "70f2bea820ccbf0b4e72e44dbcb28fe333635085"
 		},
 		{
 			"ImportPath": "github.com/golang/glog",
-			"Rev": "44145f04b68cf362d9c4df2182967c2275eaefed"
+			"Rev": "fca8c8854093a154ff1eb580aae10276ad6b1b5f"
 		},
 		{
 			"ImportPath": "github.com/hashicorp/consul/api",
-			"Comment": "v0.5.2-159-gc34bcb4",
-			"Rev": "c34bcb45c670af076846826ea72c436fbd0e2c35"
+			"Comment": "v0.5.2-322-g78aa6f1",
+			"Rev": "78aa6f1443ba506e8c9bc88b6f4448ad6fee325f"
 		},
 		{
 			"ImportPath": "golang.org/x/net/context",
-			"Rev": "446d52dd4018303a13b36097e26d0888aca5d6ef"
+			"Rev": "47990a1ba55743e6ef1affd3a14e5bac8553615d"
 		}
 	]
 }
