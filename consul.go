@@ -3,7 +3,7 @@ package consulfs
 import (
 	"errors"
 
-	"github.com/bwester/consulfs/Godeps/_workspace/src/github.com/golang/glog"
+	"github.com/Sirupsen/logrus"
 
 	consul "github.com/bwester/consulfs/Godeps/_workspace/src/github.com/hashicorp/consul/api"
 
@@ -56,6 +56,8 @@ var ErrCanceled = errors.New("operation canceled")
 type CancelConsulKv struct {
 	// The Consul client to use for executing operations.
 	Client *consul.Client
+	// Logger gets all the logging messages
+	Logger *logrus.Logger
 }
 
 // CAS performs a compare-and-swap on a key
@@ -68,10 +70,15 @@ func (cckv *CancelConsulKv) CAS(
 	metaCh := make(chan *consul.WriteMeta, 1)
 	errCh := make(chan error, 1)
 	go func() {
+		cckv.Logger.WithField("key", p.Key).Debug(" => CAS")
 		success, meta, err := cckv.Client.KV().CAS(p, q)
-		if glog.V(1) {
-			glog.Infof("CAS(%s) -> %s, %s, %s", p, success, meta, err)
-		}
+		cckv.Logger.WithFields(logrus.Fields{
+			"key":           p.Key,
+			"kv":            p,
+			"success":       success,
+			"meta":          meta,
+			logrus.ErrorKey: err,
+		}).Debug(" <= CAS")
 		if err != nil {
 			errCh <- err
 		} else {
@@ -99,10 +106,14 @@ func (cckv *CancelConsulKv) Delete(
 	metaCh := make(chan *consul.WriteMeta, 1)
 	errCh := make(chan error, 1)
 	go func() {
+		cckv.Logger.WithField("key", key).Debug(" => Delete")
 		meta, err := cckv.Client.KV().Delete(key, w)
-		if glog.V(1) {
-			glog.Infof("Delete(%s, %s) -> %s, %s", key, w, meta, err)
-		}
+		cckv.Logger.WithFields(logrus.Fields{
+			"key":           key,
+			"options":       w,
+			"meta":          meta,
+			logrus.ErrorKey: err,
+		}).Debug(" <= Delete")
 		if err != nil {
 			errCh <- err
 		} else {
@@ -129,10 +140,15 @@ func (cckv *CancelConsulKv) Get(
 	metaCh := make(chan *consul.QueryMeta, 1)
 	errCh := make(chan error, 1)
 	go func() {
+		cckv.Logger.WithField("key", key).Debug(" => Get")
 		pair, meta, err := cckv.Client.KV().Get(key, q)
-		if glog.V(1) {
-			glog.Infof("Get(%s) -> %s, %s, %s", key, pair, meta, err)
-		}
+		cckv.Logger.WithFields(logrus.Fields{
+			"key":           key,
+			"options":       q,
+			"kv":            pair,
+			"meta":          meta,
+			logrus.ErrorKey: err,
+		}).Debug(" <= Get")
 		if err != nil {
 			errCh <- err
 		} else {
@@ -162,10 +178,15 @@ func (cckv *CancelConsulKv) Keys(
 	metaCh := make(chan *consul.QueryMeta, 1)
 	errCh := make(chan error, 1)
 	go func() {
+		cckv.Logger.WithField("prefix", prefix).Debug(" => Keys")
 		keys, meta, err := cckv.Client.KV().Keys(prefix, separator, q)
-		if glog.V(1) {
-			glog.Infof("Keys(%s, %s) -> %s, %s, %s", prefix, separator, keys, meta, err)
-		}
+		cckv.Logger.WithFields(logrus.Fields{
+			"prefix":        prefix,
+			"options":       q,
+			"keys":          keys,
+			"meta":          meta,
+			logrus.ErrorKey: err,
+		}).Debug(" <= Keys")
 		if err != nil {
 			errCh <- err
 		} else {
@@ -193,10 +214,15 @@ func (cckv *CancelConsulKv) Put(
 	metaCh := make(chan *consul.WriteMeta, 1)
 	errCh := make(chan error, 1)
 	go func() {
+		cckv.Logger.WithField("key", p.Key).Debug(" => Put")
 		meta, err := cckv.Client.KV().Put(p, q)
-		if glog.V(1) {
-			glog.Infof("Put(%s, %s) -> %s, %s", p, q, meta, err)
-		}
+		cckv.Logger.WithFields(logrus.Fields{
+			"key":           p.Key,
+			"kv":            p,
+			"options":       q,
+			"meta":          meta,
+			logrus.ErrorKey: err,
+		}).Debug(" <= Put")
 		if err != nil {
 			errCh <- err
 		} else {

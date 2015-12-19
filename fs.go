@@ -27,10 +27,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Sirupsen/logrus"
 	"github.com/bwester/consulfs/Godeps/_workspace/src/bazil.org/fuse"
 	"github.com/bwester/consulfs/Godeps/_workspace/src/bazil.org/fuse/fs"
 	"github.com/bwester/consulfs/Godeps/_workspace/src/bazil.org/fuse/fuseutil"
-	"github.com/bwester/consulfs/Godeps/_workspace/src/github.com/golang/glog"
 	consul "github.com/bwester/consulfs/Godeps/_workspace/src/github.com/hashicorp/consul/api"
 	"github.com/bwester/consulfs/Godeps/_workspace/src/golang.org/x/net/context"
 )
@@ -64,10 +64,10 @@ const MaxWriteAttempts = 10
 // File is a single file's inode in the filesystem. It is backed by a key in Consul.
 type File struct {
 	ConsulFs *ConsulFs
+	Key      string // The full keyname in Consul
 
 	// Mutex guards all mutable metadata
 	Mutex   sync.Mutex
-	Key     string    // The full keyname in Consul
 	Ctime   time.Time // File attr
 	Mtime   time.Time // File attr
 	Atime   time.Time // File attr
@@ -88,7 +88,7 @@ func (file *File) SetDeleted(ctx context.Context) error {
 	file.Mutex.Lock()
 	if file.Deleted {
 		file.Mutex.Unlock()
-		glog.Warning("SetDeleted() on deleted file: ", file.Key)
+		file.ConsulFs.Logger.WithField("key", file.Key).Warning("SetDeleted() on deleted file")
 		return fuse.ENOENT
 	}
 	if !file.IsOpen {
@@ -105,14 +105,17 @@ func (file *File) SetDeleted(ctx context.Context) error {
 	file.Mutex.Lock()
 	defer file.Mutex.Unlock()
 	if file.Deleted {
-		glog.Warning("SetDeleted() file became deleted mid-call: ", file.Key)
+		file.ConsulFs.Logger.WithField("key", file.Key).Warning("SetDeleted() file became deleted mid-call")
 		return fuse.ENOENT
 	}
 	if err == ErrCanceled {
 		return fuse.EINTR
 	}
 	if err != nil {
-		glog.Errorf("consul error reading %s: %s", file.Key, err)
+		file.ConsulFs.Logger.WithFields(logrus.Fields{
+			"key":           file.Key,
+			logrus.ErrorKey: err,
+		}).Error("consul read error")
 		return fuse.EIO
 	}
 
@@ -205,7 +208,10 @@ func (file *File) ReadAll_(ctx context.Context) ([]byte, error) {
 	if err == ErrCanceled {
 		return nil, fuse.EINTR
 	} else if err != nil {
-		glog.Errorf("consul error reading %s: %s", file.Key, err)
+		file.ConsulFs.Logger.WithFields(logrus.Fields{
+			"key":           file.Key,
+			logrus.ErrorKey: err,
+		}).Error("consul read error")
 		return nil, fuse.EIO
 	}
 	if pair == nil {
@@ -269,7 +275,10 @@ func (file *File) Write(
 		if err == ErrCanceled {
 			return fuse.EINTR
 		} else if err != nil {
-			glog.Errorf("consul error reading %s: %s", file.Key, err)
+			file.ConsulFs.Logger.WithFields(logrus.Fields{
+				"key":           file.Key,
+				logrus.ErrorKey: err,
+			}).Error("consul read error")
 			return fuse.EIO
 		}
 		if pair == nil {
@@ -286,16 +295,19 @@ func (file *File) Write(
 		if err == ErrCanceled {
 			return fuse.EINTR
 		} else if err != nil {
-			glog.Errorf("consul error writing %s: %s", file.Key, err)
+			file.ConsulFs.Logger.WithFields(logrus.Fields{
+				"key":           file.Key,
+				logrus.ErrorKey: err,
+			}).Error("consul write error")
 			return fuse.EIO
 		}
 		if success {
 			resp.Size = len(req.Data)
 			return nil
 		}
-		glog.Warning("write did not succeed")
+		file.ConsulFs.Logger.WithField("key", file.Key).Warning("write did not succeed")
 	}
-	glog.Error("unable to perform timely write; aborting")
+	file.ConsulFs.Logger.WithField("key", file.Key).Error("unable to perform timely write; aborting")
 	return fuse.EIO
 }
 
@@ -359,7 +371,10 @@ func (file *File) Truncate(
 		if err == ErrCanceled {
 			return fuse.EINTR
 		} else if err != nil {
-			glog.Errorf("consul error reading %s: %s", file.Key, err)
+			file.ConsulFs.Logger.WithFields(logrus.Fields{
+				"key":           file.Key,
+				logrus.ErrorKey: err,
+			}).Error("consul read error")
 			return fuse.EIO
 		}
 		if pair == nil {
@@ -380,13 +395,16 @@ func (file *File) Truncate(
 		if err == ErrCanceled {
 			return fuse.EINTR
 		} else if err != nil {
-			glog.Errorf("consul error writing %s: %s", file.Key, err)
+			file.ConsulFs.Logger.WithFields(logrus.Fields{
+				"key":           file.Key,
+				logrus.ErrorKey: err,
+			}).Error("consul write error")
 			return fuse.EIO
 		}
 		if success {
 			return nil
 		}
-		glog.Warning("truncate did not succeed")
+		file.ConsulFs.Logger.WithField("key", file.Key).Warning("truncate did not succeed")
 	}
 	return fuse.EINTR
 }
@@ -544,7 +562,10 @@ func (dir *Dir) Refresh(ctx context.Context) error {
 	if err == ErrCanceled {
 		return fuse.EINTR
 	} else if err != nil {
-		glog.Errorf("consul error listing %s: %s", dir.Prefix, err)
+		dir.ConsulFs.Logger.WithFields(logrus.Fields{
+			"prefix":        dir.Prefix,
+			logrus.ErrorKey: err,
+		}).Error("consul list error")
 		return fuse.EIO
 	}
 	// Reminder: if the directory is empty, `keys` could be `nil`.
@@ -564,7 +585,10 @@ func (dir *Dir) Refresh(ctx context.Context) error {
 	fileNames := map[string]bool{}
 	for _, key := range keys {
 		if !strings.HasPrefix(key, dir.Prefix) {
-			glog.Warningf("%s: list included invalid key: %s", dir.Prefix, key)
+			dir.ConsulFs.Logger.WithFields(logrus.Fields{
+				"prefix": dir.Prefix,
+				"key":    key,
+			}).Warning("list included invalid key")
 			continue
 		}
 		if key == dir.Prefix {
@@ -653,7 +677,10 @@ func (dir *Dir) Create(
 	if err == ErrCanceled {
 		return nil, nil, fuse.EINTR
 	} else if err != nil {
-		glog.Errorf("consul error creating %s: %s", key, err)
+		dir.ConsulFs.Logger.WithFields(logrus.Fields{
+			"key":           key,
+			logrus.ErrorKey: err,
+		}).Error("consul create error")
 		return nil, nil, fuse.EIO
 	}
 
@@ -668,7 +695,7 @@ func (dir *Dir) Create(
 		dir.files[req.Name] = file
 	}
 	if !success {
-		glog.Warningf("create %s failed", key)
+		file.ConsulFs.Logger.WithField("key", key).Warning("create failed")
 		return nil, nil, fuse.EEXIST
 	}
 	// Just like in File.Open()
@@ -752,10 +779,13 @@ func (dir *Dir) RemoveFile(ctx context.Context, req *fuse.RemoveRequest) error {
 	// copy, but the key will still exist on the server.
 	_, err = dir.ConsulFs.Consul.Delete(ctx, file.Key, nil)
 	if err == ErrCanceled {
-		glog.Errorf("delete %s interrupted at a bad time", file.Key)
+		dir.ConsulFs.Logger.WithField("key", file.Key).Error("delete interrupted at a bad time")
 		return fuse.EINTR
 	} else if err != nil {
-		glog.Errorf("consul error deleting %s: %s", file.Key, err)
+		dir.ConsulFs.Logger.WithFields(logrus.Fields{
+			"key":           file.Key,
+			logrus.ErrorKey: err,
+		}).Error("consul delete error")
 		return fuse.EIO
 	}
 	return nil
@@ -884,6 +914,9 @@ type ConsulFs struct {
 
 	// Gid contains the GID that will own all the files in the file system.
 	Gid uint32
+
+	// Messages will be sent to this logger
+	Logger *logrus.Logger
 }
 
 // Root implements the fs.FS interface. It is called once to get the root directory inode

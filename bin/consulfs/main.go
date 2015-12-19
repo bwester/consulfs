@@ -20,9 +20,9 @@ import (
 	"path/filepath"
 	"syscall"
 
+	"github.com/Sirupsen/logrus"
 	"github.com/bwester/consulfs/Godeps/_workspace/src/bazil.org/fuse"
 	"github.com/bwester/consulfs/Godeps/_workspace/src/bazil.org/fuse/fs"
-	"github.com/bwester/consulfs/Godeps/_workspace/src/github.com/golang/glog"
 	consul "github.com/bwester/consulfs/Godeps/_workspace/src/github.com/hashicorp/consul/api"
 
 	"github.com/bwester/consulfs"
@@ -41,8 +41,13 @@ func init() {
 }
 
 func main() {
+	debug := flag.Bool("debug", false, "enable debug output")
 	flag.Parse()
-	defer glog.Flush()
+
+	logger := logrus.New()
+	if *debug {
+		logger.Level = logrus.DebugLevel
+	}
 
 	consulConfig := &consul.Config{}
 	var mountPoint string
@@ -59,16 +64,15 @@ func main() {
 	// Initialize a Consul client. TODO: connection parameters
 	client, err := consul.NewClient(consulConfig)
 	if err != nil {
-		fmt.Println("could not initialize consul: ", err)
+		logrus.NewEntry(logger).WithError(err).Error("could not initialize consul")
 		os.Exit(1)
 	}
 
 	// Mount the file system to start receiving FS events at the mount point.
-	glog.Info("mounting kvfs onto ", mountPoint)
-	glog.Flush()
+	logger.WithField("location", mountPoint).Info("mounting kvfs")
 	conn, err := fuse.Mount(mountPoint)
 	if err != nil {
-		glog.Fatalf("error mounting to %s: %s", mountPoint, err)
+		logrus.NewEntry(logger).WithError(err).Fatal("error mounting kvfs")
 	}
 	defer conn.Close()
 
@@ -76,34 +80,38 @@ func main() {
 	sigs := make(chan os.Signal, 10)
 	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
 	go func() {
-		for _ = range sigs {
-			glog.Info("attempting to unmount")
+		for sig := range sigs {
+			logger.WithField("signal", sig).Info("attempting to unmount")
 			err := fuse.Unmount(mountPoint)
 			if err != nil {
-				glog.Error("unmount error: ", err)
+				logrus.NewEntry(logger).WithError(err).Error("cannot unmount")
 			}
 		}
 	}()
 
 	// Create a file system object and start handing its requests
 	server := fs.New(conn, &fs.Config{
-		Debug: func(m interface{}) { glog.Info(m) },
+		Debug: func(m interface{}) { logger.Debug(m) },
 	})
 	f := &consulfs.ConsulFs{
-		Consul: &consulfs.CancelConsulKv{Client: client},
+		Consul: &consulfs.CancelConsulKv{
+			Client: client,
+			Logger: logger,
+		},
+		Logger: logger,
 	}
 	err = server.Serve(f)
 	if err != nil {
 		// Not sure what would cause Serve() to exit with an error
-		glog.Error("filesystem error: ", err)
+		logrus.NewEntry(logger).WithError(err).Error("error serving filesystem")
 	}
 
 	// Wait for the FUSE connection to end
 	<-conn.Ready
 	if conn.MountError != nil {
-		glog.Error(conn.MountError)
+		logrus.NewEntry(logger).WithError(conn.MountError).Error("unmount error")
 		os.Exit(1)
 	} else {
-		glog.Info("file system exiting normally")
+		logger.Info("file system exiting normally")
 	}
 }
