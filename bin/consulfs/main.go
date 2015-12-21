@@ -20,9 +20,9 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/Sirupsen/logrus"
 	"github.com/bwester/consulfs/Godeps/_workspace/src/bazil.org/fuse"
 	"github.com/bwester/consulfs/Godeps/_workspace/src/bazil.org/fuse/fs"
+	"github.com/bwester/consulfs/Godeps/_workspace/src/github.com/Sirupsen/logrus"
 	consul "github.com/bwester/consulfs/Godeps/_workspace/src/github.com/hashicorp/consul/api"
 
 	"github.com/bwester/consulfs"

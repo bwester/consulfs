@@ -3,10 +3,8 @@ package consulfs
 import (
 	"errors"
 
-	"github.com/Sirupsen/logrus"
-
+	"github.com/bwester/consulfs/Godeps/_workspace/src/github.com/Sirupsen/logrus"
 	consul "github.com/bwester/consulfs/Godeps/_workspace/src/github.com/hashicorp/consul/api"
-
 	"github.com/bwester/consulfs/Godeps/_workspace/src/golang.org/x/net/context"
 )
 
