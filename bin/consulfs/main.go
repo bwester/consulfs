@@ -41,7 +41,13 @@ func init() {
 }
 
 func main() {
+	allowOther := flag.Bool("allow-other", false, "allow all users access to the filesystem")
+	allowRoot := flag.Bool("allow-root", false, "allow root to access the filesystem")
 	debug := flag.Bool("debug", false, "enable debug output")
+	gid := flag.Int("gid", os.Getgid(), "set the GID that should own all files")
+	perm := flag.Int("perm", 0, "set the file permission flags for all files")
+	ro := flag.Bool("ro", false, "mount the filesystem read-only")
+	uid := flag.Int("uid", os.Getuid(), "set the UID that should own all files")
 	flag.Parse()
 
 	logger := logrus.New()
@@ -68,9 +74,23 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Configure some mount options
+	mountOptions := []fuse.MountOption{
+		fuse.DefaultPermissions(),
+	}
+	if *allowOther {
+		mountOptions = append(mountOptions, fuse.AllowOther())
+	}
+	if *allowRoot {
+		mountOptions = append(mountOptions, fuse.AllowRoot())
+	}
+	if *ro {
+		mountOptions = append(mountOptions, fuse.ReadOnly())
+	}
+
 	// Mount the file system to start receiving FS events at the mount point.
 	logger.WithField("location", mountPoint).Info("mounting kvfs")
-	conn, err := fuse.Mount(mountPoint)
+	conn, err := fuse.Mount(mountPoint, mountOptions...)
 	if err != nil {
 		logrus.NewEntry(logger).WithError(err).Fatal("error mounting kvfs")
 	}
@@ -99,6 +119,9 @@ func main() {
 			Logger: logger,
 		},
 		Logger: logger,
+		Uid:    uint32(*uid),
+		Gid:    uint32(*gid),
+		Perms:  os.FileMode(*perm),
 	}
 	err = server.Serve(f)
 	if err != nil {

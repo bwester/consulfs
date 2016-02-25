@@ -36,8 +36,8 @@ import (
 )
 
 // Unsupported features:
-// * File modes other than 0600
-// * Owners other than the mounter
+// * Changing file modes beyond the initial value
+// * Changing owners/groups beyond the initial value
 // * Querying Consul ACLs to determine access permissions
 // * Renaming directories
 //
@@ -53,6 +53,10 @@ import (
 //   the O_APPEND flag to FUSE open requests. It probably does the appends by issuing
 //   writes to the "end" of the file, where the end is defined by the size, which is
 //   faked to be zero.
+// * When using "allow_{root,other}" mount options on OS X, directory entries are not
+//   refreshed. The immediate cause seems to be that the fuse.Server system caches old
+//	 dirents. But I don't yet understand why the unshared (default) option refrehses its
+//   caches more frequently.
 //
 // With its current feature set, ConsulFs can be used for basic access with core POSIX tools.
 // More complex uses, like compiling and linking an executable, break horribly in strange
@@ -133,7 +137,7 @@ func (file *File) SetDeleted(ctx context.Context) error {
 
 // lockedAttr fills in an Attr struct for this file. Call when the file's mutex is locked.
 func (file *File) lockedAttr(attr *fuse.Attr) {
-	attr.Mode = 0600
+	attr.Mode = file.ConsulFs.mode()
 	if !file.Deleted {
 		attr.Nlink = 1
 	}
@@ -421,7 +425,7 @@ func (file *File) Setattr(
 		return fuse.ENOTSUP
 	}
 	// Support only idempotent writes. This is needed so cp(1) can copy a file.
-	if req.Valid.Mode() && req.Mode != 0600 {
+	if req.Valid.Mode() && req.Mode != file.ConsulFs.mode() {
 		return fuse.EPERM
 	}
 	// The truncate operation could fail, so do it first before altering any other file
@@ -517,13 +521,28 @@ func (dir *Dir) NewDir(prefix string) *Dir {
 // Attr implements the Node interface. It is called when fetching the inode attribute for
 // this directory (e.g., to service stat(2)).
 func (dir *Dir) Attr(ctx context.Context, attr *fuse.Attr) error {
-	attr.Mode = os.ModeDir | 0700
+	attr.Mode = dir.mode()
 	// Nlink should technically include all the files in the directory, but VFS seems fine
 	// with the constant "2".
 	attr.Nlink = 2
 	attr.Uid = dir.ConsulFs.Uid
 	attr.Gid = dir.ConsulFs.Gid
 	return nil
+}
+
+func (dir *Dir) mode() os.FileMode {
+	mode := dir.ConsulFs.mode() | os.ModeDir
+	// Add ?+x if ?+r is present
+	if mode&0400 == 0400 {
+		mode |= 0100
+	}
+	if mode&0040 == 0040 {
+		mode |= 0010
+	}
+	if mode&0004 == 0004 {
+		mode |= 0001
+	}
+	return mode
 }
 
 // Lookup implements the NodeStringLookuper interface, to look up a directory entry by
@@ -915,6 +934,10 @@ type ConsulFs struct {
 	// Gid contains the GID that will own all the files in the file system.
 	Gid uint32
 
+	// Perms sets the file permission flags for all files and directories. If zero, a
+	// default of 0600 will be used.
+	Perms os.FileMode
+
 	// Messages will be sent to this logger
 	Logger *logrus.Logger
 }
@@ -929,4 +952,11 @@ func (f *ConsulFs) Root() (fs.Node, error) {
 		files:    make(map[string]*File),
 		dirs:     make(map[string]*Dir),
 	}, nil
+}
+
+func (f *ConsulFs) mode() os.FileMode {
+	if f.Perms == 0 {
+		return 0600
+	}
+	return f.Perms & os.ModePerm
 }
