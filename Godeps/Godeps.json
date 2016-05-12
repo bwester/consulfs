@@ -8,29 +8,42 @@
 	"Deps": [
 		{
 			"ImportPath": "bazil.org/fuse",
-			"Rev": "70f2bea820ccbf0b4e72e44dbcb28fe333635085"
+			"Rev": "5d02b06737b3b3c2e6a44e03348b6f2b44aa6835"
 		},
 		{
 			"ImportPath": "bazil.org/fuse/fs",
-			"Rev": "70f2bea820ccbf0b4e72e44dbcb28fe333635085"
+			"Rev": "5d02b06737b3b3c2e6a44e03348b6f2b44aa6835"
 		},
 		{
 			"ImportPath": "bazil.org/fuse/fuseutil",
-			"Rev": "70f2bea820ccbf0b4e72e44dbcb28fe333635085"
+			"Rev": "5d02b06737b3b3c2e6a44e03348b6f2b44aa6835"
 		},
 		{
 			"ImportPath": "github.com/Sirupsen/logrus",
-			"Comment": "v0.8.7",
-			"Rev": "418b41d23a1bf978c06faea5313ba194650ac088"
+			"Comment": "v0.10.0",
+			"Rev": "4b6ea7319e214d98c938f12692336f7ca9348d6b"
 		},
 		{
 			"ImportPath": "github.com/hashicorp/consul/api",
-			"Comment": "v0.5.2-322-g78aa6f1",
-			"Rev": "78aa6f1443ba506e8c9bc88b6f4448ad6fee325f"
+			"Comment": "v0.6.3",
+			"Rev": "c933efde50d25395c7b5a42167578fda603d43d8"
+		},
+		{
+			"ImportPath": "github.com/hashicorp/go-cleanhttp",
+			"Rev": "ce617e79981a8fff618bb643d155133a8f38db96"
+		},
+		{
+			"ImportPath": "github.com/hashicorp/serf/coordinate",
+			"Comment": "v0.7.0-1-g39c7c06",
+			"Rev": "39c7c06298b480560202bec00c2c77e974e88792"
 		},
 		{
 			"ImportPath": "golang.org/x/net/context",
-			"Rev": "47990a1ba55743e6ef1affd3a14e5bac8553615d"
+			"Rev": "96dbb961a39ddccf16860cdd355bfa639c497f23"
+		},
+		{
+			"ImportPath": "golang.org/x/sys/unix",
+			"Rev": "833a04a10549a95dc34458c195cbad61bbb6cb4d"
 		}
 	]
 }
