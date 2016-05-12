@@ -3,9 +3,9 @@ package consulfs
 import (
 	"errors"
 
-	"github.com/bwester/consulfs/Godeps/_workspace/src/github.com/Sirupsen/logrus"
-	consul "github.com/bwester/consulfs/Godeps/_workspace/src/github.com/hashicorp/consul/api"
-	"github.com/bwester/consulfs/Godeps/_workspace/src/golang.org/x/net/context"
+	"github.com/Sirupsen/logrus"
+	consul "github.com/hashicorp/consul/api"
+	"golang.org/x/net/context"
 )
 
 // ConsulCanceler defines an API for accessing a Consul Key-Value store. It's mostly a

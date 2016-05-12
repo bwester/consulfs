@@ -1,12 +1,21 @@
 {
 	"ImportPath": "github.com/bwester/consulfs",
-	"GoVersion": "go1.5.1",
+	"GoVersion": "go1.5",
+	"GodepVersion": "v62",
 	"Packages": [
 		"github.com/bwester/consulfs/..."
 	],
 	"Deps": [
 		{
 			"ImportPath": "bazil.org/fuse",
+			"Rev": "70f2bea820ccbf0b4e72e44dbcb28fe333635085"
+		},
+		{
+			"ImportPath": "bazil.org/fuse/fs",
+			"Rev": "70f2bea820ccbf0b4e72e44dbcb28fe333635085"
+		},
+		{
+			"ImportPath": "bazil.org/fuse/fuseutil",
 			"Rev": "70f2bea820ccbf0b4e72e44dbcb28fe333635085"
 		},
 		{
