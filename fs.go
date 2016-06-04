@@ -938,6 +938,11 @@ type ConsulFs struct {
 	// default of 0600 will be used.
 	Perms os.FileMode
 
+	// RootPath contains the path to the root of the filesystem in Consul. This
+	// string will be prefixed to all paths requested from Consul. A path
+	// separator will be added if needed.
+	RootPath string
+
 	// Messages will be sent to this logger
 	Logger *logrus.Logger
 }
@@ -947,7 +952,7 @@ type ConsulFs struct {
 func (f *ConsulFs) Root() (fs.Node, error) {
 	return &Dir{
 		ConsulFs: f,
-		Prefix:   "",
+		Prefix:   f.rootPath(),
 		Level:    0,
 		files:    make(map[string]*File),
 		dirs:     make(map[string]*Dir),
@@ -959,4 +964,11 @@ func (f *ConsulFs) mode() os.FileMode {
 		return 0600
 	}
 	return f.Perms & os.ModePerm
+}
+
+func (f *ConsulFs) rootPath() string {
+	if f.RootPath == "" || strings.HasSuffix(f.RootPath, "/") {
+		return f.RootPath
+	}
+	return f.RootPath + "/"
 }

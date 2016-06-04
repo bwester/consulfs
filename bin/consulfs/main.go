@@ -47,6 +47,7 @@ func main() {
 	gid := flag.Int("gid", os.Getgid(), "set the GID that should own all files")
 	perm := flag.Int("perm", 0, "set the file permission flags for all files")
 	ro := flag.Bool("ro", false, "mount the filesystem read-only")
+	root := flag.String("root", "", "path in Consul to the root of the filesystem")
 	uid := flag.Int("uid", os.Getuid(), "set the UID that should own all files")
 	flag.Parse()
 
@@ -118,10 +119,11 @@ func main() {
 			Client: client,
 			Logger: logger,
 		},
-		Logger: logger,
-		Uid:    uint32(*uid),
-		Gid:    uint32(*gid),
-		Perms:  os.FileMode(*perm),
+		Logger:   logger,
+		Uid:      uint32(*uid),
+		Gid:      uint32(*gid),
+		Perms:    os.FileMode(*perm),
+		RootPath: *root,
 	}
 	err = server.Serve(f)
 	if err != nil {
