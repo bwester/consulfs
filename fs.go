@@ -1,21 +1,22 @@
-// ConsulFS implements a FUSE filesystem that is backed by a Consul Key-Value store.
+// Package consulfs implements a FUSE filesystem that is backed by a Consul Key-Value
+// store.
 //
 // API Usage
 // ---------
 // ConsulFS is implemented using the "bazil.org/fuse" package as a file system service.
 // Refer to the fuse package for complete documentation on how to create a new FUSE
 // connection that services a mount point. To have that mount point serve ConsulFS files,
-// create a new instance of `ConsulFs`, give it to an "bazil.org/fuse/fs.Server", and call
-// its Serve() method. The source code for the mounter at
+// create a new instance of `ConsulFS` and pass it to the
+// "bazil.org/fuse/fs".Server.Serve() method. The source code for the mounter at
 // "github.com/bwester/consulfs/bin/consulfs" gives a full example of how to perform the
 // mounting.
 //
-// The `ConsulFs` instance contains common configuration data and is referenced by all
-// file and directory inodes. Notably, 'Uid' and 'Gid' set the uid and gid ownership of
+// The `ConsulFS` instance contains common configuration data and is referenced by all
+// file and directory inodes. Notably, 'UID' and 'GID' set the uid and gid ownership of
 // all files. The `Consul` option is used to perform all Consul HTTP RPCs. The
-// `CancelConsulKv` struct is included in this package as a wrapper around the standard
+// `CancelConsulKV` struct is included in this package as a wrapper around the standard
 // Consul APIs. It is vital for system stability that the file system not get into an
-// uninteruptable sleep waiting for a remote RPC to complete, so CancelConsulKv will
+// uninteruptable sleep waiting for a remote RPC to complete, so CancelConsulKV will
 // abandon requests when needed.
 package consulfs
 
@@ -58,16 +59,17 @@ import (
 //	 dirents. But I don't yet understand why the unshared (default) option refrehses its
 //   caches more frequently.
 //
-// With its current feature set, ConsulFs can be used for basic access with core POSIX tools.
+// With its current feature set, ConsulFS can be used for basic access with core POSIX tools.
 // More complex uses, like compiling and linking an executable, break horribly in strange
 // ways.
 
-// The number of time a write will be attempted before returning an error
+// MaxWriteAttempts sets the number of time a write will be attempted before an
+// error is returned.
 const MaxWriteAttempts = 10
 
-// File is a single file's inode in the filesystem. It is backed by a key in Consul.
-type File struct {
-	ConsulFs *ConsulFs
+// consulFile is a single file's inode in the filesystem. It is backed by a key in Consul.
+type consulFile struct {
+	ConsulFS *ConsulFS
 	Key      string // The full keyname in Consul
 
 	// Mutex guards all mutable metadata
@@ -87,12 +89,12 @@ type File struct {
 // as if it exists, but when they close, it is removed. These semantics are preserved by
 // caching a copy of the file and operating on that copy, letting the key on Consul be
 // deleted eagerly.
-func (file *File) SetDeleted(ctx context.Context) error {
+func (file *consulFile) SetDeleted(ctx context.Context) error {
 	// If the file is already deleted, there is nothing more to do
 	file.Mutex.Lock()
 	if file.Deleted {
 		file.Mutex.Unlock()
-		file.ConsulFs.Logger.WithField("key", file.Key).Warning("SetDeleted() on deleted file")
+		file.ConsulFS.Logger.WithField("key", file.Key).Warning("SetDeleted() on deleted file")
 		return fuse.ENOENT
 	}
 	if !file.IsOpen {
@@ -104,19 +106,19 @@ func (file *File) SetDeleted(ctx context.Context) error {
 	file.Mutex.Unlock()
 
 	// Get a copy of the value to cache
-	pair, _, err := file.ConsulFs.Consul.Get(ctx, file.Key, nil)
+	pair, _, err := file.ConsulFS.Consul.Get(ctx, file.Key, nil)
 
 	file.Mutex.Lock()
 	defer file.Mutex.Unlock()
 	if file.Deleted {
-		file.ConsulFs.Logger.WithField("key", file.Key).Warning("SetDeleted() file became deleted mid-call")
+		file.ConsulFS.Logger.WithField("key", file.Key).Warning("SetDeleted() file became deleted mid-call")
 		return fuse.ENOENT
 	}
 	if err == ErrCanceled {
 		return fuse.EINTR
 	}
 	if err != nil {
-		file.ConsulFs.Logger.WithFields(logrus.Fields{
+		file.ConsulFS.Logger.WithFields(logrus.Fields{
 			"key":           file.Key,
 			logrus.ErrorKey: err,
 		}).Error("consul read error")
@@ -136,8 +138,8 @@ func (file *File) SetDeleted(ctx context.Context) error {
 }
 
 // lockedAttr fills in an Attr struct for this file. Call when the file's mutex is locked.
-func (file *File) lockedAttr(attr *fuse.Attr) {
-	attr.Mode = file.ConsulFs.mode()
+func (file *consulFile) lockedAttr(attr *fuse.Attr) {
+	attr.Mode = file.ConsulFS.mode()
 	if !file.Deleted {
 		attr.Nlink = 1
 	}
@@ -145,8 +147,8 @@ func (file *File) lockedAttr(attr *fuse.Attr) {
 	attr.Ctime = file.Ctime
 	attr.Mtime = file.Mtime
 	attr.Atime = file.Atime
-	attr.Uid = file.ConsulFs.Uid
-	attr.Gid = file.ConsulFs.Gid
+	attr.Uid = file.ConsulFS.UID
+	attr.Gid = file.ConsulFS.GID
 	if file.IsOpen {
 		// Some applications like seeking...
 		attr.Size = file.Size
@@ -155,7 +157,7 @@ func (file *File) lockedAttr(attr *fuse.Attr) {
 
 // Attr implements the Node interface. It is called when fetching the inode attribute for
 // this file (e.g., to service stat(2)).
-func (file *File) Attr(ctx context.Context, attr *fuse.Attr) error {
+func (file *consulFile) Attr(ctx context.Context, attr *fuse.Attr) error {
 	file.Mutex.Lock()
 	defer file.Mutex.Unlock()
 	file.lockedAttr(attr)
@@ -164,7 +166,7 @@ func (file *File) Attr(ctx context.Context, attr *fuse.Attr) error {
 
 // BufferRead returns locally-buffered file contents, which will only be used if the file
 // is deleted.
-func (file *File) BufferRead() ([]byte, bool) {
+func (file *consulFile) BufferRead() ([]byte, bool) {
 	file.Mutex.Lock()
 	defer file.Mutex.Unlock()
 	if !file.Deleted {
@@ -177,12 +179,12 @@ func (file *File) BufferRead() ([]byte, bool) {
 
 // Read implements the HandleReader interface. It is called to handle every read request.
 // Because the file is opened in DirectIO mode, the kernel will not cache any file data.
-func (file *File) Read(
+func (file *consulFile) Read(
 	ctx context.Context,
 	req *fuse.ReadRequest,
 	resp *fuse.ReadResponse,
 ) error {
-	data, err := file.ReadAll_(ctx)
+	data, err := file.readAll(ctx)
 	if err != nil {
 		return err
 	}
@@ -190,11 +192,11 @@ func (file *File) Read(
 	return nil
 }
 
-// ReadAll_ handles every read request by fetching the key from the server. This leads to
+// readAll handles every read request by fetching the key from the server. This leads to
 // simple consistency guarantees, as there is no caching, but performance may suffer in
-// distributed settings. It intentionally does not implement the ReadAller interface to
+// distributed settings. It intentionally does not implement the fs.ReadAller interface to
 // avoid the caching inherent in that interface.
-func (file *File) ReadAll_(ctx context.Context) ([]byte, error) {
+func (file *consulFile) readAll(ctx context.Context) ([]byte, error) {
 	// If the file has been removed from its directory, then data will come from the local
 	// cache only.
 	if data, ok := file.BufferRead(); ok {
@@ -205,14 +207,14 @@ func (file *File) ReadAll_(ctx context.Context) ([]byte, error) {
 	// could be used to distinguish a file's generation.
 
 	// Query Consul for the full value for the file's key
-	pair, _, err := file.ConsulFs.Consul.Get(ctx, file.Key, nil)
+	pair, _, err := file.ConsulFS.Consul.Get(ctx, file.Key, nil)
 	if data, ok := file.BufferRead(); ok {
 		return data, nil
 	}
 	if err == ErrCanceled {
 		return nil, fuse.EINTR
 	} else if err != nil {
-		file.ConsulFs.Logger.WithFields(logrus.Fields{
+		file.ConsulFS.Logger.WithFields(logrus.Fields{
 			"key":           file.Key,
 			logrus.ErrorKey: err,
 		}).Error("consul read error")
@@ -248,7 +250,7 @@ func doWrite(
 	return buf
 }
 
-func (file *File) BufferWrite(req *fuse.WriteRequest, resp *fuse.WriteResponse) bool {
+func (file *consulFile) bufferWrite(req *fuse.WriteRequest, resp *fuse.WriteResponse) bool {
 	file.Mutex.Lock()
 	defer file.Mutex.Unlock()
 	if !file.Deleted {
@@ -263,23 +265,23 @@ func (file *File) BufferWrite(req *fuse.WriteRequest, resp *fuse.WriteResponse) 
 // mode) to allow this module to handle consistency itself. Current strategy is to read
 // the file, change the written portions, then write it back atomically. If the key was
 // updated between the read and the write, try again.
-func (file *File) Write(
+func (file *consulFile) Write(
 	ctx context.Context,
 	req *fuse.WriteRequest,
 	resp *fuse.WriteResponse,
 ) error {
 	for attempts := 0; attempts < MaxWriteAttempts; attempts++ {
-		if file.BufferWrite(req, resp) {
+		if file.bufferWrite(req, resp) {
 			return nil
 		}
-		pair, _, err := file.ConsulFs.Consul.Get(ctx, file.Key, nil)
-		if file.BufferWrite(req, resp) {
+		pair, _, err := file.ConsulFS.Consul.Get(ctx, file.Key, nil)
+		if file.bufferWrite(req, resp) {
 			return nil
 		}
 		if err == ErrCanceled {
 			return fuse.EINTR
 		} else if err != nil {
-			file.ConsulFs.Logger.WithFields(logrus.Fields{
+			file.ConsulFS.Logger.WithFields(logrus.Fields{
 				"key":           file.Key,
 				logrus.ErrorKey: err,
 			}).Error("consul read error")
@@ -292,14 +294,14 @@ func (file *File) Write(
 		pair.Value = doWrite(req.Offset, req.Data, pair.Value)
 
 		// Write it back!
-		success, _, err := file.ConsulFs.Consul.CAS(ctx, pair, nil)
-		if file.BufferWrite(req, resp) {
+		success, _, err := file.ConsulFS.Consul.CAS(ctx, pair, nil)
+		if file.bufferWrite(req, resp) {
 			return nil
 		}
 		if err == ErrCanceled {
 			return fuse.EINTR
 		} else if err != nil {
-			file.ConsulFs.Logger.WithFields(logrus.Fields{
+			file.ConsulFS.Logger.WithFields(logrus.Fields{
 				"key":           file.Key,
 				logrus.ErrorKey: err,
 			}).Error("consul write error")
@@ -309,15 +311,15 @@ func (file *File) Write(
 			resp.Size = len(req.Data)
 			return nil
 		}
-		file.ConsulFs.Logger.WithField("key", file.Key).Warning("write did not succeed")
+		file.ConsulFS.Logger.WithField("key", file.Key).Warning("write did not succeed")
 	}
-	file.ConsulFs.Logger.WithField("key", file.Key).Error("unable to perform timely write; aborting")
+	file.ConsulFS.Logger.WithField("key", file.Key).Error("unable to perform timely write; aborting")
 	return fuse.EIO
 }
 
 // Fsync implements the NodeFsyncer interface. It is called to explicitly flush cached
 // data to storage (e.g., on a fsync(2) call). Since data is not cached, this is a no-op.
-func (file *File) Fsync(
+func (file *consulFile) Fsync(
 	ctx context.Context,
 	req *fuse.FsyncRequest,
 ) error {
@@ -345,7 +347,7 @@ func doTruncate(buf []byte, size uint64) ([]byte, bool) {
 	return newBuf, true
 }
 
-func (file *File) BufferTruncate(size uint64) bool {
+func (file *consulFile) bufferTruncate(size uint64) bool {
 	file.Mutex.Lock()
 	defer file.Mutex.Unlock()
 	if !file.Deleted {
@@ -359,23 +361,23 @@ func (file *File) BufferTruncate(size uint64) bool {
 // as needed. Note that a Consul Key-Value pair has two data segments, "value" and
 // "flags," and this operation only changes the value. So to preserve the flags, a full
 // read-modify-write must be done, even when the value is cleared entirely.
-func (file *File) Truncate(
+func (file *consulFile) Truncate(
 	ctx context.Context,
 	size uint64,
 ) error {
 	for attempts := 0; attempts < MaxWriteAttempts; attempts++ {
-		if file.BufferTruncate(size) {
+		if file.bufferTruncate(size) {
 			return nil
 		}
 		// Read the contents of the key
-		pair, _, err := file.ConsulFs.Consul.Get(ctx, file.Key, nil)
-		if file.BufferTruncate(size) {
+		pair, _, err := file.ConsulFS.Consul.Get(ctx, file.Key, nil)
+		if file.bufferTruncate(size) {
 			return nil
 		}
 		if err == ErrCanceled {
 			return fuse.EINTR
 		} else if err != nil {
-			file.ConsulFs.Logger.WithFields(logrus.Fields{
+			file.ConsulFS.Logger.WithFields(logrus.Fields{
 				"key":           file.Key,
 				logrus.ErrorKey: err,
 			}).Error("consul read error")
@@ -392,14 +394,14 @@ func (file *File) Truncate(
 		}
 
 		// Write the results back
-		success, _, err := file.ConsulFs.Consul.CAS(ctx, pair, nil)
-		if file.BufferTruncate(size) {
+		success, _, err := file.ConsulFS.Consul.CAS(ctx, pair, nil)
+		if file.bufferTruncate(size) {
 			return nil
 		}
 		if err == ErrCanceled {
 			return fuse.EINTR
 		} else if err != nil {
-			file.ConsulFs.Logger.WithFields(logrus.Fields{
+			file.ConsulFS.Logger.WithFields(logrus.Fields{
 				"key":           file.Key,
 				logrus.ErrorKey: err,
 			}).Error("consul write error")
@@ -408,7 +410,7 @@ func (file *File) Truncate(
 		if success {
 			return nil
 		}
-		file.ConsulFs.Logger.WithField("key", file.Key).Warning("truncate did not succeed")
+		file.ConsulFS.Logger.WithField("key", file.Key).Warning("truncate did not succeed")
 	}
 	return fuse.EINTR
 }
@@ -416,7 +418,7 @@ func (file *File) Truncate(
 // Setattr implements the fs.NodeSetattrer interface. This is used by the kernel to
 // request metadata changes, including the file's size (used by ftruncate(2) or by
 // open("...", O_TRUNC) to clear a file's content).
-func (file *File) Setattr(
+func (file *consulFile) Setattr(
 	ctx context.Context,
 	req *fuse.SetattrRequest,
 	resp *fuse.SetattrResponse,
@@ -425,7 +427,7 @@ func (file *File) Setattr(
 		return fuse.ENOTSUP
 	}
 	// Support only idempotent writes. This is needed so cp(1) can copy a file.
-	if req.Valid.Mode() && req.Mode != file.ConsulFs.mode() {
+	if req.Valid.Mode() && req.Mode != file.ConsulFS.mode() {
 		return fuse.EPERM
 	}
 	// The truncate operation could fail, so do it first before altering any other file
@@ -458,7 +460,7 @@ func (file *File) Setattr(
 // Open implements the NodeOpener interface. It is called the first time a file is opened
 // by any process. Further opens or FD duplications will reuse this handle. When all FDs
 // have been closed, Release() will be called.
-func (file *File) Open(
+func (file *consulFile) Open(
 	ctx context.Context,
 	req *fuse.OpenRequest,
 	resp *fuse.OpenResponse,
@@ -475,17 +477,17 @@ func (file *File) Open(
 
 // Release implements the HandleReleaser interface. It is called when all file descriptors
 // to the file have been closed.
-func (file *File) Release(ctx context.Context, req *fuse.ReleaseRequest) error {
+func (file *consulFile) Release(ctx context.Context, req *fuse.ReleaseRequest) error {
 	file.Mutex.Lock()
 	defer file.Mutex.Unlock()
 	file.IsOpen = false
 	return nil
 }
 
-// Dir represents a directory inode in VFS. Directories don't actually exist in Consul.
-// TODO: discuss the strategy used to fake dirs.
-type Dir struct {
-	ConsulFs *ConsulFs
+// consulDir represents a directory inode in VFS. Directories don't actually exist in
+// Consul. TODO: discuss the strategy used to fake dirs.
+type consulDir struct {
+	ConsulFS *ConsulFS
 	Prefix   string
 	Level    uint
 
@@ -493,14 +495,14 @@ type Dir struct {
 	mux       sync.Mutex
 	expires   time.Time
 	readIndex uint64
-	files     map[string]*File
-	dirs      map[string]*Dir
+	files     map[string]*consulFile
+	dirs      map[string]*consulDir
 }
 
-func (dir *Dir) NewFile(key string) *File {
+func (dir *consulDir) newFile(key string) *consulFile {
 	now := time.Now()
-	return &File{
-		ConsulFs: dir.ConsulFs,
+	return &consulFile{
+		ConsulFS: dir.ConsulFS,
 		Key:      key,
 		Ctime:    now,
 		Mtime:    now,
@@ -508,30 +510,30 @@ func (dir *Dir) NewFile(key string) *File {
 	}
 }
 
-func (dir *Dir) NewDir(prefix string) *Dir {
-	return &Dir{
-		ConsulFs: dir.ConsulFs,
+func (dir *consulDir) newDir(prefix string) *consulDir {
+	return &consulDir{
+		ConsulFS: dir.ConsulFS,
 		Prefix:   prefix,
 		Level:    dir.Level + 1,
-		files:    make(map[string]*File),
-		dirs:     make(map[string]*Dir),
+		files:    make(map[string]*consulFile),
+		dirs:     make(map[string]*consulDir),
 	}
 }
 
 // Attr implements the Node interface. It is called when fetching the inode attribute for
 // this directory (e.g., to service stat(2)).
-func (dir *Dir) Attr(ctx context.Context, attr *fuse.Attr) error {
+func (dir *consulDir) Attr(ctx context.Context, attr *fuse.Attr) error {
 	attr.Mode = dir.mode()
 	// Nlink should technically include all the files in the directory, but VFS seems fine
 	// with the constant "2".
 	attr.Nlink = 2
-	attr.Uid = dir.ConsulFs.Uid
-	attr.Gid = dir.ConsulFs.Gid
+	attr.Uid = dir.ConsulFS.UID
+	attr.Gid = dir.ConsulFS.GID
 	return nil
 }
 
-func (dir *Dir) mode() os.FileMode {
-	mode := dir.ConsulFs.mode() | os.ModeDir
+func (dir *consulDir) mode() os.FileMode {
+	mode := dir.ConsulFS.mode() | os.ModeDir
 	// Add ?+x if ?+r is present
 	if mode&0400 == 0400 {
 		mode |= 0100
@@ -548,8 +550,8 @@ func (dir *Dir) mode() os.FileMode {
 // Lookup implements the NodeStringLookuper interface, to look up a directory entry by
 // name. This is called to get the inode for the given name. The name doesn't have to have
 // been returned by ReadDirAll() for a process to attempt to find it!
-func (dir *Dir) Lookup(ctx context.Context, name string) (fs.Node, error) {
-	err := dir.Refresh(ctx)
+func (dir *consulDir) Lookup(ctx context.Context, name string) (fs.Node, error) {
+	err := dir.refresh(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -565,7 +567,7 @@ func (dir *Dir) Lookup(ctx context.Context, name string) (fs.Node, error) {
 	return nil, fuse.ENOENT
 }
 
-func (dir *Dir) Refresh(ctx context.Context) error {
+func (dir *consulDir) refresh(ctx context.Context) error {
 	// Check if the cached directory listing has expired
 	now := time.Now()
 	dir.mux.Lock()
@@ -577,11 +579,11 @@ func (dir *Dir) Refresh(ctx context.Context) error {
 
 	// Call Consul to get an updated listing. This could block for a while, so
 	// do not hold the dir lock while calling.
-	keys, meta, err := dir.ConsulFs.Consul.Keys(ctx, dir.Prefix, "/", nil)
+	keys, meta, err := dir.ConsulFS.Consul.Keys(ctx, dir.Prefix, "/", nil)
 	if err == ErrCanceled {
 		return fuse.EINTR
 	} else if err != nil {
-		dir.ConsulFs.Logger.WithFields(logrus.Fields{
+		dir.ConsulFS.Logger.WithFields(logrus.Fields{
 			"prefix":        dir.Prefix,
 			logrus.ErrorKey: err,
 		}).Error("consul list error")
@@ -604,7 +606,7 @@ func (dir *Dir) Refresh(ctx context.Context) error {
 	fileNames := map[string]bool{}
 	for _, key := range keys {
 		if !strings.HasPrefix(key, dir.Prefix) {
-			dir.ConsulFs.Logger.WithFields(logrus.Fields{
+			dir.ConsulFS.Logger.WithFields(logrus.Fields{
 				"prefix": dir.Prefix,
 				"key":    key,
 			}).Warning("list included invalid key")
@@ -620,12 +622,12 @@ func (dir *Dir) Refresh(ctx context.Context) error {
 			// Probably a directory
 			dirName := name[:len(name)-1]
 			if _, ok := dir.dirs[dirName]; !ok {
-				dir.dirs[dirName] = dir.NewDir(key)
+				dir.dirs[dirName] = dir.newDir(key)
 			}
 		} else {
 			// Data-holding key
 			if _, ok := dir.files[name]; !ok {
-				dir.files[name] = dir.NewFile(key)
+				dir.files[name] = dir.newFile(key)
 			}
 			fileNames[name] = true
 		}
@@ -643,9 +645,9 @@ func (dir *Dir) Refresh(ctx context.Context) error {
 
 // ReadDirAll returns the entire contents of the directory when the directory is being
 // listed (e.g., with "ls").
-func (dir *Dir) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
+func (dir *consulDir) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 	// Get Consul to refresh the local cache of the directory's entries
-	err := dir.Refresh(ctx)
+	err := dir.refresh(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -673,7 +675,7 @@ func (dir *Dir) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 // Create implements the NodeCreater interface. It is called to create and open a new
 // file. The kernel will first try to Lookup the name, and this method will only be called
 // if the name didn't exist.
-func (dir *Dir) Create(
+func (dir *consulDir) Create(
 	ctx context.Context,
 	req *fuse.CreateRequest,
 	resp *fuse.CreateResponse,
@@ -692,11 +694,11 @@ func (dir *Dir) Create(
 		Flags:       0,
 		Value:       []byte{},
 	}
-	success, _, err := dir.ConsulFs.Consul.CAS(ctx, pair, nil)
+	success, _, err := dir.ConsulFS.Consul.CAS(ctx, pair, nil)
 	if err == ErrCanceled {
 		return nil, nil, fuse.EINTR
 	} else if err != nil {
-		dir.ConsulFs.Logger.WithFields(logrus.Fields{
+		dir.ConsulFS.Logger.WithFields(logrus.Fields{
 			"key":           key,
 			logrus.ErrorKey: err,
 		}).Error("consul create error")
@@ -707,14 +709,14 @@ func (dir *Dir) Create(
 	defer dir.mux.Unlock()
 	// Success or failure, once the Consul CAS operation completes without an error, the key
 	// exists in the store. Make sure it's in the local cache.
-	var file *File
+	var file *consulFile
 	var ok bool
 	if file, ok = dir.files[req.Name]; !ok {
-		file = dir.NewFile(key)
+		file = dir.newFile(key)
 		dir.files[req.Name] = file
 	}
 	if !success {
-		file.ConsulFs.Logger.WithField("key", key).Warning("create failed")
+		file.ConsulFS.Logger.WithField("key", key).Warning("create failed")
 		return nil, nil, fuse.EEXIST
 	}
 	// Just like in File.Open()
@@ -723,7 +725,7 @@ func (dir *Dir) Create(
 }
 
 // RemoveDir is called to remove a directory
-func (dir *Dir) RemoveDir(ctx context.Context, req *fuse.RemoveRequest) error {
+func (dir *consulDir) RemoveDir(ctx context.Context, req *fuse.RemoveRequest) error {
 	// Look in the cache to find the child directory being removed.
 	dir.mux.Lock()
 	childDir, ok := dir.dirs[req.Name]
@@ -735,7 +737,7 @@ func (dir *Dir) RemoveDir(ctx context.Context, req *fuse.RemoveRequest) error {
 
 	// Don't delete a directory with files in it. To do that, we have to refresh the
 	// file listing of the directory.
-	err := childDir.Refresh(ctx)
+	err := childDir.refresh(ctx)
 	if err != nil {
 		return err
 	}
@@ -763,7 +765,7 @@ func (dir *Dir) RemoveDir(ctx context.Context, req *fuse.RemoveRequest) error {
 }
 
 // RemoveFile is called to unlink a file.
-func (dir *Dir) RemoveFile(ctx context.Context, req *fuse.RemoveRequest) error {
+func (dir *consulDir) RemoveFile(ctx context.Context, req *fuse.RemoveRequest) error {
 	// Get a reference to the file
 	dir.mux.Lock()
 	file, ok := dir.files[req.Name]
@@ -796,12 +798,12 @@ func (dir *Dir) RemoveFile(ctx context.Context, req *fuse.RemoveRequest) error {
 	// Finally, remove the file's key from Consul. Errors at this step are horrible.
 	// Any process that had the file open already will be working on its own forked
 	// copy, but the key will still exist on the server.
-	_, err = dir.ConsulFs.Consul.Delete(ctx, file.Key, nil)
+	_, err = dir.ConsulFS.Consul.Delete(ctx, file.Key, nil)
 	if err == ErrCanceled {
-		dir.ConsulFs.Logger.WithField("key", file.Key).Error("delete interrupted at a bad time")
+		dir.ConsulFS.Logger.WithField("key", file.Key).Error("delete interrupted at a bad time")
 		return fuse.EINTR
 	} else if err != nil {
-		dir.ConsulFs.Logger.WithFields(logrus.Fields{
+		dir.ConsulFS.Logger.WithFields(logrus.Fields{
 			"key":           file.Key,
 			logrus.ErrorKey: err,
 		}).Error("consul delete error")
@@ -812,7 +814,7 @@ func (dir *Dir) RemoveFile(ctx context.Context, req *fuse.RemoveRequest) error {
 
 // Remove implements the NodeRemover interface. It is called to remove files or directory
 // from a directory's contents.
-func (dir *Dir) Remove(ctx context.Context, req *fuse.RemoveRequest) error {
+func (dir *consulDir) Remove(ctx context.Context, req *fuse.RemoveRequest) error {
 	if req.Dir {
 		return dir.RemoveDir(ctx, req)
 	}
@@ -820,10 +822,10 @@ func (dir *Dir) Remove(ctx context.Context, req *fuse.RemoveRequest) error {
 }
 
 // Mkdir implements the NodeMkdirer interface. It is called to make a new directory.
-func (dir *Dir) Mkdir(ctx context.Context, req *fuse.MkdirRequest) (fs.Node, error) {
+func (dir *consulDir) Mkdir(ctx context.Context, req *fuse.MkdirRequest) (fs.Node, error) {
 	// Since directories don't exist in Consul, this is easy! Make sure the name doesn't
 	// already exist, then add an entry for it.
-	err := dir.Refresh(ctx)
+	err := dir.refresh(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -836,17 +838,17 @@ func (dir *Dir) Mkdir(ctx context.Context, req *fuse.MkdirRequest) (fs.Node, err
 	if _, ok := dir.files[req.Name]; ok {
 		return nil, fuse.EEXIST
 	}
-	newDir := dir.NewDir(dir.Prefix + req.Name + "/")
+	newDir := dir.newDir(dir.Prefix + req.Name + "/")
 	dir.dirs[req.Name] = newDir
 	return newDir, nil
 }
 
 // lockSet holds a set of locked Dirs so they can be easily unlocked.
-type lockSet []*Dir
+type lockSet []*consulDir
 
 // Len implements the sort.Interface interface. Returns the number of Dirs in the set.
 func (ls lockSet) Len() int {
-	return len([]*Dir(ls))
+	return len([]*consulDir(ls))
 }
 
 // Less implements the sort.Interface interface. Equivalent to: ls[i] < ls[j].
@@ -862,7 +864,7 @@ func (ls lockSet) Swap(i, j int) {
 
 // Unlock will release the mutexes on every Dir in a lockSet.
 func (ls lockSet) Unlock() {
-	var last *Dir
+	var last *consulDir
 	for _, d := range ls {
 		if d != last {
 			d.mux.Unlock()
@@ -875,10 +877,10 @@ func (ls lockSet) Unlock() {
 // deadlocks. Dirs are ordered by level in the tree, then by prefix. This lock
 // order allows a parent directory to always be able to lock one of its children without
 // needing to drop its own lock first.
-func lockDirs(dirs ...*Dir) lockSet {
+func lockDirs(dirs ...*consulDir) lockSet {
 	ls := lockSet(dirs)
 	sort.Sort(ls)
-	var last *Dir
+	var last *consulDir
 	for _, d := range ls {
 		if d != last {
 			d.mux.Lock()
@@ -893,21 +895,21 @@ func lockDirs(dirs ...*Dir) lockSet {
 // directories at this time. Consul doesn't have a rename operation, so the new name is
 // written and the old one deleted as two separate actions. If the new name already exists
 // as a file, it is replaced atomically.
-func (dir *Dir) Rename(
+func (dir *consulDir) Rename(
 	ctx context.Context,
 	req *fuse.RenameRequest,
 	newDirNode fs.Node,
 ) error {
-	newDir, ok := newDirNode.(*Dir)
+	newDir, ok := newDirNode.(*consulDir)
 	if !ok {
 		return fuse.ENOTSUP
 	}
 	var ndRefresh chan error
 	if newDir != dir {
 		ndRefresh = make(chan error)
-		go func() { ndRefresh <- dir.Refresh(ctx) }()
+		go func() { ndRefresh <- dir.refresh(ctx) }()
 	}
-	err := dir.Refresh(ctx)
+	err := dir.refresh(ctx)
 	if err != nil {
 		return err
 	}
@@ -923,16 +925,16 @@ func (dir *Dir) Rename(
 	return fuse.ENOTSUP
 }
 
-// ConsulFs is the main file system object that represents a Consul Key-Value store.
-type ConsulFs struct {
+// ConsulFS is the main file system object that represents a Consul Key-Value store.
+type ConsulFS struct {
 	// Consul contains a referene to the ConsulCanceler that should be used for all operations.
 	Consul ConsulCanceler
 
-	// Uid contains the UID that will own all the files in the file system.
-	Uid uint32
+	// UID contains the UID that will own all the files in the file system.
+	UID uint32
 
-	// Gid contains the GID that will own all the files in the file system.
-	Gid uint32
+	// GID contains the GID that will own all the files in the file system.
+	GID uint32
 
 	// Perms sets the file permission flags for all files and directories. If zero, a
 	// default of 0600 will be used.
@@ -949,24 +951,24 @@ type ConsulFs struct {
 
 // Root implements the fs.FS interface. It is called once to get the root directory inode
 // for the mount point.
-func (f *ConsulFs) Root() (fs.Node, error) {
-	return &Dir{
-		ConsulFs: f,
+func (f *ConsulFS) Root() (fs.Node, error) {
+	return &consulDir{
+		ConsulFS: f,
 		Prefix:   f.rootPath(),
 		Level:    0,
-		files:    make(map[string]*File),
-		dirs:     make(map[string]*Dir),
+		files:    make(map[string]*consulFile),
+		dirs:     make(map[string]*consulDir),
 	}, nil
 }
 
-func (f *ConsulFs) mode() os.FileMode {
+func (f *ConsulFS) mode() os.FileMode {
 	if f.Perms == 0 {
 		return 0600
 	}
 	return f.Perms & os.ModePerm
 }
 
-func (f *ConsulFs) rootPath() string {
+func (f *ConsulFS) rootPath() string {
 	if f.RootPath == "" || strings.HasSuffix(f.RootPath, "/") {
 		return f.RootPath
 	}

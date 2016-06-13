@@ -114,14 +114,14 @@ func main() {
 	server := fs.New(conn, &fs.Config{
 		Debug: func(m interface{}) { logger.Debug(m) },
 	})
-	f := &consulfs.ConsulFs{
-		Consul: &consulfs.CancelConsulKv{
+	f := &consulfs.ConsulFS{
+		Consul: &consulfs.CancelConsulKV{
 			Client: client,
 			Logger: logger,
 		},
 		Logger:   logger,
-		Uid:      uint32(*uid),
-		Gid:      uint32(*gid),
+		UID:      uint32(*uid),
+		GID:      uint32(*gid),
 		Perms:    os.FileMode(*perm),
 		RootPath: *root,
 	}

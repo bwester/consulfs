@@ -47,11 +47,11 @@ type ConsulCanceler interface {
 // ErrCanceled is returned whenever a Consul operation is canceled.
 var ErrCanceled = errors.New("operation canceled")
 
-// CancelConsulKv is the concrete implementation of ConsulCanceler. It takes a Consul
+// CancelConsulKV is the concrete implementation of ConsulCanceler. It takes a Consul
 // `Client` object and performs all operations using that client. When an operation is
 // "canceled", the method call will return immediately with an ErrCanceled error
 // returned. The underlying HTTP call is not aborted.
-type CancelConsulKv struct {
+type CancelConsulKV struct {
 	// The Consul client to use for executing operations.
 	Client *consul.Client
 	// Logger gets all the logging messages
@@ -59,7 +59,7 @@ type CancelConsulKv struct {
 }
 
 // CAS performs a compare-and-swap on a key
-func (cckv *CancelConsulKv) CAS(
+func (cckv *CancelConsulKV) CAS(
 	ctx context.Context,
 	p *consul.KVPair,
 	q *consul.WriteOptions,
@@ -96,7 +96,7 @@ func (cckv *CancelConsulKv) CAS(
 }
 
 // Delete removes a key and its data.
-func (cckv *CancelConsulKv) Delete(
+func (cckv *CancelConsulKV) Delete(
 	ctx context.Context,
 	key string,
 	w *consul.WriteOptions,
@@ -129,7 +129,7 @@ func (cckv *CancelConsulKv) Delete(
 }
 
 // Get returns the current value of a key.
-func (cckv *CancelConsulKv) Get(
+func (cckv *CancelConsulKV) Get(
 	ctx context.Context,
 	key string,
 	q *consul.QueryOptions,
@@ -166,7 +166,7 @@ func (cckv *CancelConsulKv) Get(
 }
 
 // Keys lists all keys under a prefix
-func (cckv *CancelConsulKv) Keys(
+func (cckv *CancelConsulKV) Keys(
 	ctx context.Context,
 	prefix string,
 	separator string,
@@ -204,7 +204,7 @@ func (cckv *CancelConsulKv) Keys(
 }
 
 // Put writes a key-value pair to the store
-func (cckv *CancelConsulKv) Put(
+func (cckv *CancelConsulKV) Put(
 	ctx context.Context,
 	p *consul.KVPair,
 	q *consul.WriteOptions,
