@@ -19,14 +19,19 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"bazil.org/fuse"
 	"bazil.org/fuse/fs"
 	"github.com/Sirupsen/logrus"
 	consul "github.com/hashicorp/consul/api"
+	"golang.org/x/net/context"
 
 	"github.com/bwester/consulfs"
 )
+
+// Default timeout for all requests. 60s is the default for OSXFUSE.
+const defaultTimeout = "60s"
 
 func init() {
 	flag.Usage = func() {
@@ -48,6 +53,7 @@ func main() {
 	perm := flag.Int("perm", 0, "set the file permission flags for all files")
 	ro := flag.Bool("ro", false, "mount the filesystem read-only")
 	root := flag.String("root", "", "path in Consul to the root of the filesystem")
+	timeout := flag.String("timeout", defaultTimeout, "timeout for Consul requests")
 	uid := flag.Int("uid", os.Getuid(), "set the UID that should own all files")
 	flag.Parse()
 
@@ -76,8 +82,13 @@ func main() {
 	}
 
 	// Configure some mount options
+	timeoutDuration, err := time.ParseDuration(*timeout)
+	if err != nil {
+		logrus.NewEntry(logger).WithError(err).Fatal("invalid -timeout value")
+	}
 	mountOptions := []fuse.MountOption{
 		fuse.DefaultPermissions(),
+		fuse.DaemonTimeout(fmt.Sprint(int64(timeoutDuration.Seconds() + 1))),
 	}
 	if *allowOther {
 		mountOptions = append(mountOptions, fuse.AllowOther())
@@ -113,6 +124,12 @@ func main() {
 	// Create a file system object and start handing its requests
 	server := fs.New(conn, &fs.Config{
 		Debug: func(m interface{}) { logger.Debug(m) },
+		WithContext: func(ctx context.Context, req fuse.Request) context.Context {
+			// The returned cancel function doesn't matter: the request handler will
+			// cancel the parent context at the end of the request.
+			newCtx, _ := context.WithTimeout(ctx, timeoutDuration)
+			return newCtx
+		},
 	})
 	f := &consulfs.ConsulFS{
 		Consul: &consulfs.CancelConsulKV{
