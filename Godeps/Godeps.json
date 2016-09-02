@@ -8,15 +8,15 @@
 	"Deps": [
 		{
 			"ImportPath": "bazil.org/fuse",
-			"Rev": "5d02b06737b3b3c2e6a44e03348b6f2b44aa6835"
+			"Rev": "371fbbdaa8987b715bdd21d6adc4c9b20155f748"
 		},
 		{
 			"ImportPath": "bazil.org/fuse/fs",
-			"Rev": "5d02b06737b3b3c2e6a44e03348b6f2b44aa6835"
+			"Rev": "371fbbdaa8987b715bdd21d6adc4c9b20155f748"
 		},
 		{
 			"ImportPath": "bazil.org/fuse/fuseutil",
-			"Rev": "5d02b06737b3b3c2e6a44e03348b6f2b44aa6835"
+			"Rev": "371fbbdaa8987b715bdd21d6adc4c9b20155f748"
 		},
 		{
 			"ImportPath": "github.com/Sirupsen/logrus",
@@ -39,11 +39,11 @@
 		},
 		{
 			"ImportPath": "golang.org/x/net/context",
-			"Rev": "96dbb961a39ddccf16860cdd355bfa639c497f23"
+			"Rev": "1358eff22f0dd0c54fc521042cc607f6ff4b531a"
 		},
 		{
 			"ImportPath": "golang.org/x/sys/unix",
-			"Rev": "833a04a10549a95dc34458c195cbad61bbb6cb4d"
+			"Rev": "a646d33e2ee3172a661fc09bca23bb4889a41bc8"
 		}
 	]
 }
