@@ -83,6 +83,13 @@ type consulFile struct {
 	Buf     []byte    // If the file is deleted, buffers data locally
 }
 
+// deletedUnlocked returns the Deleted field to a caller that hasn't locked the file.
+func (file *consulFile) deletedUnlocked() bool {
+	file.Mutex.Lock()
+	defer file.Mutex.Unlock()
+	return file.Deleted
+}
+
 // SetDeleted marks this file as deleted.
 //
 // If the file is open, Posix says those processes should continue to operate on the file
@@ -161,6 +168,68 @@ func (file *consulFile) Attr(ctx context.Context, attr *fuse.Attr) error {
 	file.Mutex.Lock()
 	defer file.Mutex.Unlock()
 	file.lockedAttr(attr)
+	return nil
+}
+
+// readSession is like readAll, except it returns the key's "Session" metadata instead of
+// its "Value".
+func (file *consulFile) readSession(ctx context.Context) ([]byte, error) {
+	if file.deletedUnlocked() {
+		return nil, nil
+	}
+	pair, _, err := file.ConsulFS.Consul.Get(ctx, file.Key, nil)
+	if file.deletedUnlocked() {
+		return nil, nil
+	}
+	if err == ErrCanceled {
+		return nil, fuse.EINTR
+	}
+	if err != nil {
+		file.ConsulFS.Logger.WithFields(logrus.Fields{
+			"key":           file.Key,
+			logrus.ErrorKey: err,
+		}).Error("consul read error")
+		return nil, fuse.EIO
+	}
+	if pair == nil {
+		return nil, fuse.ENOENT
+	}
+	return []byte(pair.Session), nil
+}
+
+// Getxattr fetches the contents a named extended attribute. The name doesn't have to have
+// been returned by a previous Listxattr().
+func (file *consulFile) Getxattr(
+	ctx context.Context,
+	req *fuse.GetxattrRequest,
+	resp *fuse.GetxattrResponse,
+) error {
+	var data []byte
+	var err error
+	switch req.Name {
+	case "session":
+		data, err = file.readSession(ctx)
+	default:
+		err = fuse.ErrNoXattr
+	}
+	if err != nil {
+		return err
+	}
+	// OSXFUSE returns an "[Errno 34] Result too large" error the userspace process when
+	// this method attempts to return an empty data set, so it's easier to pretend the
+	// xattr never existed.
+	if len(data) == 0 {
+		return fuse.ErrNoXattr
+	}
+	if req.Position >= uint32(len(data)) {
+		data = nil
+	} else {
+		data = data[req.Position:]
+	}
+	if req.Size != 0 && uint32(len(data)) > req.Size {
+		data = data[:req.Size]
+	}
+	resp.Xattr = data
 	return nil
 }
 
