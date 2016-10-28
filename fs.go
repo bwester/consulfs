@@ -601,6 +601,26 @@ func (dir *consulDir) Attr(ctx context.Context, attr *fuse.Attr) error {
 	return nil
 }
 
+// Listxattr implements the NodeListxattrer interface to retrieve a list of xattrs.
+// Directories have no xattrs.
+func (dir *consulDir) Listxattr(
+	ctx context.Context,
+	req *fuse.ListxattrRequest,
+	resp *fuse.ListxattrResponse,
+) error {
+	return nil
+}
+
+// Getxattr implements the NodeGetxattrer interface to retrieve the contents of a specific
+// xattr. Directories have no xattrs.
+func (dir *consulDir) Getxattr(
+	ctx context.Context,
+	req *fuse.GetxattrRequest,
+	resp *fuse.GetxattrResponse,
+) error {
+	return fuse.ErrNoXattr
+}
+
 func (dir *consulDir) mode() os.FileMode {
 	mode := dir.ConsulFS.mode() | os.ModeDir
 	// Add ?+x if ?+r is present
