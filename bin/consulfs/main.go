@@ -89,6 +89,8 @@ func main() {
 	mountOptions := []fuse.MountOption{
 		fuse.DefaultPermissions(),
 		fuse.DaemonTimeout(fmt.Sprint(int64(timeoutDuration.Seconds() + 1))),
+		fuse.NoAppleDouble(),
+		fuse.NoAppleXattr(),
 	}
 	if *allowOther {
 		mountOptions = append(mountOptions, fuse.AllowOther())
