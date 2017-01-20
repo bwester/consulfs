@@ -8,7 +8,7 @@
 // connection that services a mount point. To have that mount point serve ConsulFS files,
 // create a new instance of `ConsulFS` and pass it to the
 // "bazil.org/fuse/fs".Server.Serve() method. The source code for the mounter at
-// "github.com/bwester/consulfs/bin/consulfs" gives a full example of how to perform the
+// "github.com/bwester/consulfs/cmd/consulfs" gives a full example of how to perform the
 // mounting.
 //
 // The `ConsulFS` instance contains common configuration data and is referenced by all

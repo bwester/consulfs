@@ -27,7 +27,7 @@ Binary packages can also be downloaded from [golang.org](http://golang.org/).
 Once FUSE and Go are installed, you can download, build, and install ConsulFS by
 running the following command:
 
-    $ go get github.com/bwester/consulfs/bin/consulfs
+    $ go get github.com/bwester/consulfs/cmd/consulfs
 
 That will create the binary `$GOPATH/bin/consulfs`, which you can call directly
 or copy to your preferred location for binaries.
