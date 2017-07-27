@@ -121,7 +121,7 @@ func (file *consulFile) SetDeleted(ctx context.Context) error {
 		file.ConsulFS.Logger.WithField("key", file.Key).Warning("SetDeleted() file became deleted mid-call")
 		return fuse.ENOENT
 	}
-	if err == ErrCanceled {
+	if err == context.Canceled || err == context.DeadlineExceeded {
 		return fuse.EINTR
 	}
 	if err != nil {
@@ -181,7 +181,7 @@ func (file *consulFile) readSession(ctx context.Context) ([]byte, error) {
 	if file.deletedUnlocked() {
 		return nil, nil
 	}
-	if err == ErrCanceled {
+	if err == context.Canceled || err == context.DeadlineExceeded {
 		return nil, fuse.EINTR
 	}
 	if err != nil {
@@ -280,7 +280,7 @@ func (file *consulFile) readAll(ctx context.Context) ([]byte, error) {
 	if data, ok := file.BufferRead(); ok {
 		return data, nil
 	}
-	if err == ErrCanceled {
+	if err == context.Canceled || err == context.DeadlineExceeded {
 		return nil, fuse.EINTR
 	} else if err != nil {
 		file.ConsulFS.Logger.WithFields(logrus.Fields{
@@ -347,7 +347,7 @@ func (file *consulFile) Write(
 		if file.bufferWrite(req, resp) {
 			return nil
 		}
-		if err == ErrCanceled {
+		if err == context.Canceled || err == context.DeadlineExceeded {
 			return fuse.EINTR
 		} else if err != nil {
 			file.ConsulFS.Logger.WithFields(logrus.Fields{
@@ -367,7 +367,7 @@ func (file *consulFile) Write(
 		if file.bufferWrite(req, resp) {
 			return nil
 		}
-		if err == ErrCanceled {
+		if err == context.Canceled || err == context.DeadlineExceeded {
 			return fuse.EINTR
 		} else if err != nil {
 			file.ConsulFS.Logger.WithFields(logrus.Fields{
@@ -443,7 +443,7 @@ func (file *consulFile) Truncate(
 		if file.bufferTruncate(size) {
 			return nil
 		}
-		if err == ErrCanceled {
+		if err == context.Canceled || err == context.DeadlineExceeded {
 			return fuse.EINTR
 		} else if err != nil {
 			file.ConsulFS.Logger.WithFields(logrus.Fields{
@@ -467,7 +467,7 @@ func (file *consulFile) Truncate(
 		if file.bufferTruncate(size) {
 			return nil
 		}
-		if err == ErrCanceled {
+		if err == context.Canceled || err == context.DeadlineExceeded {
 			return fuse.EINTR
 		} else if err != nil {
 			file.ConsulFS.Logger.WithFields(logrus.Fields{
@@ -669,7 +669,7 @@ func (dir *consulDir) refresh(ctx context.Context) error {
 	// Call Consul to get an updated listing. This could block for a while, so
 	// do not hold the dir lock while calling.
 	keys, meta, err := dir.ConsulFS.Consul.Keys(ctx, dir.Prefix, "/", nil)
-	if err == ErrCanceled {
+	if err == context.Canceled || err == context.DeadlineExceeded {
 		return fuse.EINTR
 	} else if err != nil {
 		dir.ConsulFS.Logger.WithFields(logrus.Fields{
@@ -784,7 +784,7 @@ func (dir *consulDir) Create(
 		Value:       []byte{},
 	}
 	success, _, err := dir.ConsulFS.Consul.CAS(ctx, pair, nil)
-	if err == ErrCanceled {
+	if err == context.Canceled || err == context.DeadlineExceeded {
 		return nil, nil, fuse.EINTR
 	} else if err != nil {
 		dir.ConsulFS.Logger.WithFields(logrus.Fields{
@@ -888,7 +888,7 @@ func (dir *consulDir) RemoveFile(ctx context.Context, req *fuse.RemoveRequest) e
 	// Any process that had the file open already will be working on its own forked
 	// copy, but the key will still exist on the server.
 	_, err = dir.ConsulFS.Consul.Delete(ctx, file.Key, nil)
-	if err == ErrCanceled {
+	if err == context.Canceled || err == context.DeadlineExceeded {
 		dir.ConsulFS.Logger.WithField("key", file.Key).Error("delete interrupted at a bad time")
 		return fuse.EINTR
 	} else if err != nil {

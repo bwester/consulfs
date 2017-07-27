@@ -1,8 +1,6 @@
 package consulfs
 
 import (
-	"errors"
-
 	"github.com/Sirupsen/logrus"
 	consul "github.com/hashicorp/consul/api"
 	"golang.org/x/net/context"
@@ -44,13 +42,10 @@ type ConsulCanceler interface {
 	) (*consul.WriteMeta, error)
 }
 
-// ErrCanceled is returned whenever a Consul operation is canceled.
-var ErrCanceled = errors.New("operation canceled")
-
 // CancelConsulKV is the concrete implementation of ConsulCanceler. It takes a Consul
 // `Client` object and performs all operations using that client. When an operation is
-// "canceled", the method call will return immediately with an ErrCanceled error
-// returned. The underlying HTTP call is not aborted.
+// "canceled", the method call will return immediately with the context error. The
+// underlying HTTP call is not aborted.
 type CancelConsulKV struct {
 	// The Consul client to use for executing operations.
 	Client *consul.Client
@@ -91,7 +86,7 @@ func (cckv *CancelConsulKV) CAS(
 	case err := <-errCh:
 		return false, nil, err
 	case <-ctx.Done():
-		return false, nil, ErrCanceled
+		return false, nil, ctx.Err()
 	}
 }
 
@@ -124,7 +119,7 @@ func (cckv *CancelConsulKV) Delete(
 	case err := <-errCh:
 		return nil, err
 	case <-ctx.Done():
-		return nil, ErrCanceled
+		return nil, ctx.Err()
 	}
 }
 
@@ -161,7 +156,7 @@ func (cckv *CancelConsulKV) Get(
 	case err := <-errCh:
 		return nil, nil, err
 	case <-ctx.Done():
-		return nil, nil, ErrCanceled
+		return nil, nil, ctx.Err()
 	}
 }
 
@@ -199,7 +194,7 @@ func (cckv *CancelConsulKV) Keys(
 	case err := <-errCh:
 		return nil, nil, err
 	case <-ctx.Done():
-		return nil, nil, ErrCanceled
+		return nil, nil, ctx.Err()
 	}
 }
 
@@ -233,6 +228,6 @@ func (cckv *CancelConsulKV) Put(
 	case err := <-errCh:
 		return nil, err
 	case <-ctx.Done():
-		return nil, ErrCanceled
+		return nil, ctx.Err()
 	}
 }
