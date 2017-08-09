@@ -1,0 +1,11 @@
+[[constraint]]
+  name = "bazil.org/fuse"
+  branch = "master"
+
+[[constraint]]
+  name = "github.com/Sirupsen/logrus"
+  version = "^1.0.2"
+
+[[constraint]]
+  name = "github.com/hashicorp/consul"
+  version = ">= 0.9.0"
