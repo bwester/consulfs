@@ -23,8 +23,8 @@ import (
 
 	"bazil.org/fuse"
 	"bazil.org/fuse/fs"
-	"github.com/Sirupsen/logrus"
 	consul "github.com/hashicorp/consul/api"
+	"github.com/sirupsen/logrus"
 	"golang.org/x/net/context"
 
 	"github.com/bwester/consulfs"

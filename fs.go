@@ -31,8 +31,8 @@ import (
 	"bazil.org/fuse"
 	"bazil.org/fuse/fs"
 	"bazil.org/fuse/fuseutil"
-	"github.com/Sirupsen/logrus"
 	consul "github.com/hashicorp/consul/api"
+	"github.com/sirupsen/logrus"
 	"golang.org/x/net/context"
 )
 
