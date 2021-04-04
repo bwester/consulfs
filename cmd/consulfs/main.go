@@ -54,6 +54,7 @@ func main() {
 	ro := flag.Bool("ro", false, "mount the filesystem read-only")
 	root := flag.String("root", "", "path in Consul to the root of the filesystem")
 	timeout := flag.String("timeout", defaultTimeout, "timeout for Consul requests")
+	tokenFile := flag.String("token-file", "", "use the ACL token from this file to connect to Consul")
 	uid := flag.Int("uid", os.Getuid(), "set the UID that should own all files")
 	flag.Parse()
 
@@ -62,7 +63,10 @@ func main() {
 		logger.Level = logrus.DebugLevel
 	}
 
-	consulConfig := &consul.Config{}
+	consulConfig := consul.DefaultConfig()
+	if *tokenFile != "" {
+		consulConfig.TokenFile = *tokenFile
+	}
 	var mountPoint string
 	switch flag.NArg() {
 	case 1:
