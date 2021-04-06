@@ -113,7 +113,7 @@ func (file *consulFile) SetDeleted(ctx context.Context) error {
 	file.Mutex.Unlock()
 
 	// Get a copy of the value to cache
-	pair, _, err := file.ConsulFS.Consul.Get(ctx, file.Key, nil)
+	pair, _, err := file.ConsulFS.get(ctx, file.Key, nil)
 
 	file.Mutex.Lock()
 	defer file.Mutex.Unlock()
@@ -177,7 +177,7 @@ func (file *consulFile) readSession(ctx context.Context) ([]byte, error) {
 	if file.deletedUnlocked() {
 		return nil, nil
 	}
-	pair, _, err := file.ConsulFS.Consul.Get(ctx, file.Key, nil)
+	pair, _, err := file.ConsulFS.get(ctx, file.Key, nil)
 	if file.deletedUnlocked() {
 		return nil, nil
 	}
@@ -276,7 +276,7 @@ func (file *consulFile) readAll(ctx context.Context) ([]byte, error) {
 	// could be used to distinguish a file's generation.
 
 	// Query Consul for the full value for the file's key
-	pair, _, err := file.ConsulFS.Consul.Get(ctx, file.Key, nil)
+	pair, _, err := file.ConsulFS.get(ctx, file.Key, nil)
 	if data, ok := file.BufferRead(); ok {
 		return data, nil
 	}
@@ -343,7 +343,7 @@ func (file *consulFile) Write(
 		if file.bufferWrite(req, resp) {
 			return nil
 		}
-		pair, _, err := file.ConsulFS.Consul.Get(ctx, file.Key, nil)
+		pair, _, err := file.ConsulFS.get(ctx, file.Key, nil)
 		if file.bufferWrite(req, resp) {
 			return nil
 		}
@@ -363,7 +363,7 @@ func (file *consulFile) Write(
 		pair.Value = doWrite(req.Offset, req.Data, pair.Value)
 
 		// Write it back!
-		success, _, err := file.ConsulFS.Consul.CAS(ctx, pair, nil)
+		success, _, err := file.ConsulFS.cas(ctx, pair, nil)
 		if file.bufferWrite(req, resp) {
 			return nil
 		}
@@ -439,7 +439,7 @@ func (file *consulFile) Truncate(
 			return nil
 		}
 		// Read the contents of the key
-		pair, _, err := file.ConsulFS.Consul.Get(ctx, file.Key, nil)
+		pair, _, err := file.ConsulFS.get(ctx, file.Key, nil)
 		if file.bufferTruncate(size) {
 			return nil
 		}
@@ -463,7 +463,7 @@ func (file *consulFile) Truncate(
 		}
 
 		// Write the results back
-		success, _, err := file.ConsulFS.Consul.CAS(ctx, pair, nil)
+		success, _, err := file.ConsulFS.cas(ctx, pair, nil)
 		if file.bufferTruncate(size) {
 			return nil
 		}
@@ -668,7 +668,7 @@ func (dir *consulDir) refresh(ctx context.Context) error {
 
 	// Call Consul to get an updated listing. This could block for a while, so
 	// do not hold the dir lock while calling.
-	keys, meta, err := dir.ConsulFS.Consul.Keys(ctx, dir.Prefix, "/", nil)
+	keys, meta, err := dir.ConsulFS.keys(ctx, dir.Prefix, "/", nil)
 	if err == context.Canceled || err == context.DeadlineExceeded {
 		return fuse.EINTR
 	} else if err != nil {
@@ -783,7 +783,7 @@ func (dir *consulDir) Create(
 		Flags:       0,
 		Value:       []byte{},
 	}
-	success, _, err := dir.ConsulFS.Consul.CAS(ctx, pair, nil)
+	success, _, err := dir.ConsulFS.cas(ctx, pair, nil)
 	if err == context.Canceled || err == context.DeadlineExceeded {
 		return nil, nil, fuse.EINTR
 	} else if err != nil {
@@ -887,7 +887,7 @@ func (dir *consulDir) RemoveFile(ctx context.Context, req *fuse.RemoveRequest) e
 	// Finally, remove the file's key from Consul. Errors at this step are horrible.
 	// Any process that had the file open already will be working on its own forked
 	// copy, but the key will still exist on the server.
-	_, err = dir.ConsulFS.Consul.Delete(ctx, file.Key, nil)
+	_, err = dir.ConsulFS.delete(ctx, file.Key, nil)
 	if err == context.Canceled || err == context.DeadlineExceeded {
 		dir.ConsulFS.Logger.WithField("key", file.Key).Error("delete interrupted at a bad time")
 		return fuse.EINTR
@@ -1016,8 +1016,8 @@ func (dir *consulDir) Rename(
 
 // ConsulFS is the main file system object that represents a Consul Key-Value store.
 type ConsulFS struct {
-	// Consul contains a referene to the ConsulCanceler that should be used for all operations.
-	Consul ConsulCanceler
+	// Client is used to make all calls to Consul.
+	Client *consul.Client
 
 	// UID contains the UID that will own all the files in the file system.
 	UID uint32
@@ -1062,4 +1062,76 @@ func (f *ConsulFS) rootPath() string {
 		return f.RootPath
 	}
 	return f.RootPath + "/"
+}
+
+// cas performs a compare-and-swap on a key.
+func (f *ConsulFS) cas(
+	ctx context.Context,
+	p *consul.KVPair,
+	q *consul.WriteOptions,
+) (bool, *consul.WriteMeta, error) {
+	f.Logger.WithField("key", p.Key).Debug(" => CAS")
+	success, meta, err := f.Client.KV().CAS(p, q.WithContext(ctx))
+	f.Logger.WithFields(logrus.Fields{
+		"key":           p.Key,
+		"kv":            p,
+		"success":       success,
+		"meta":          meta,
+		logrus.ErrorKey: err,
+	}).Debug(" <= CAS")
+	return success, meta, err
+}
+
+// delete removes a key and its data.
+func (f *ConsulFS) delete(
+	ctx context.Context,
+	key string,
+	w *consul.WriteOptions,
+) (*consul.WriteMeta, error) {
+	f.Logger.WithField("key", key).Debug(" => Delete")
+	meta, err := f.Client.KV().Delete(key, w.WithContext(ctx))
+	f.Logger.WithFields(logrus.Fields{
+		"key":           key,
+		"options":       w,
+		"meta":          meta,
+		logrus.ErrorKey: err,
+	}).Debug(" <= Delete")
+	return meta, err
+}
+
+// get returns the current value of a key.
+func (f *ConsulFS) get(
+	ctx context.Context,
+	key string,
+	q *consul.QueryOptions,
+) (*consul.KVPair, *consul.QueryMeta, error) {
+	f.Logger.WithField("key", key).Debug(" => Get")
+	pair, meta, err := f.Client.KV().Get(key, q.WithContext(ctx))
+	f.Logger.WithFields(logrus.Fields{
+		"key":           key,
+		"options":       q,
+		"kv":            pair,
+		"meta":          meta,
+		logrus.ErrorKey: err,
+	}).Debug(" <= Get")
+	return pair, meta, err
+}
+
+// keys lists all keys under a prefix
+func (f *ConsulFS) keys(
+	ctx context.Context,
+	prefix string,
+	separator string,
+	q *consul.QueryOptions,
+) ([]string, *consul.QueryMeta, error) {
+	f.Logger.WithField("prefix", prefix).Debug(" => Keys")
+	keys, meta, err := f.Client.KV().Keys(prefix, separator, q.WithContext(ctx))
+	f.Logger.WithFields(logrus.Fields{
+		"prefix":        prefix,
+		"options":       q,
+		"keys":          keys,
+		"meta":          meta,
+		logrus.ErrorKey: err,
+	}).Debug(" <= Keys")
+	return keys, meta, err
 }

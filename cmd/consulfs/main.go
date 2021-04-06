@@ -138,10 +138,7 @@ func main() {
 		},
 	})
 	f := &consulfs.ConsulFS{
-		Consul: &consulfs.CancelConsulKV{
-			Client: client,
-			Logger: logger,
-		},
+		Client:   client,
 		Logger:   logger,
 		UID:      uint32(*uid),
 		GID:      uint32(*gid),
